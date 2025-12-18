@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>InvoiceBox V5.8 UI Fix</title>
+    <link rel="stylesheet" href="/static/index.min.css" />
+    <script src="/static/vue.global.js"></script>
+    <script src="/static/index.full.js"></script>
+    <script src="/static/icons.js"></script>
+    <style>
+        [v-cloak] { display: none; }
+        :root { --bg: #F5F7FA; --accent: #007AFF; --text: #1D1D1F; --border: #E5E6EB; }
+        * { box-sizing: border-box; user-select: none; font-family: "Microsoft YaHei", sans-serif; }
+        body { margin: 0; background: var(--bg); height: 100vh; display: flex; justify-content: center; align-items: center; color: var(--text); }
+        
+        #app { width: 98vw; height: 96vh; background: #fff; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.15); display: flex; overflow: hidden; border: 1px solid rgba(0,0,0,0.05); }
+        
+        .top-bar { height: 64px; background: #fff; border-bottom: 1px solid #E4E7ED; display: flex; align-items: center; justify-content: flex-end; padding: 0 24px; position: relative; z-index: 100; }
+        
+        .seg-ctrl { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #f1f1f1; padding: 3px; border-radius: 8px; display: flex; z-index: 1000; cursor: pointer; pointer-events: auto; }
+        .seg-item { padding: 5px 24px; font-size: 13px; border-radius: 6px; cursor: pointer; color: #666; transition: 0.2s; font-weight: 500; }
+        .seg-item:hover { background: #e6e6e6; }
+        .seg-item.active { background: #fff; color: #000; box-shadow: 0 2px 5px rgba(0,0,0,0.1); font-weight: bold; cursor: default; }
+        
+        .actions { display: flex; gap: 10px; z-index: 100; }
+        
+        /* 🔥 修复1：找回了丢失的 svg 尺寸限制，按钮图标恢复正常大小 */
+        .btn { border: none; padding: 0 16px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: 0.2s; display: flex; align-items: center; gap: 5px; }
+        .btn svg { width: 16px; height: 16px; } 
+        
+        .btn-print { background: #F2F2F7; color: #333; } .btn-print:hover { background: #E5E5EA; }
+        .btn-dl { background: var(--accent); color: #fff; box-shadow: 0 2px 8px rgba(0,122,255,0.3); } .btn-dl:hover { transform: translateY(-1px); background: #0062CC; }
+
+        .sidebar { width: 340px; background: #Fbfbfd; border-right: 1px solid rgba(0,0,0,0.06); padding: 20px; display: flex; flex-direction: column; z-index: 10; position: relative; }
+        .brand-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .brand { font-size: 18px; font-weight: 800; display: flex; align-items: center; gap: 8px; color: #333; }
+        .brand svg { width: 24px; height: 24px; color: var(--accent); }
+        .btn-clear { font-size: 12px; color: #909399; cursor: pointer; display: flex; align-items: center; gap: 4px; transition: 0.2s; } .btn-clear:hover { color: #F56C6C; }
+
+        .upload-area { border: 1px dashed #ccc; border-radius: 10px; height: 80px; display: flex; align-items: center; justify-content: center; color: #999; cursor: pointer; transition: 0.2s; font-size: 13px; background: #FAFAFA; margin-bottom: 15px; }
+        .upload-area:hover { border-color: var(--accent); color: var(--accent); background: #ECF5FF; }
+        
+        .list { flex: 1; overflow-y: auto; padding-right: 4px; margin-bottom: 32px; }
+        .card { background: #fff; padding: 12px; border-radius: 10px; margin-bottom: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 1px solid #EBEEF5; transition: 0.2s; cursor: grab; }
+        .card:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.08); border-color: #C6E2FF; }
+        .card.dragging { opacity: 0.5; border: 2px dashed var(--accent); }
+        
+        .tag-select { border: none; background: #eee; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold; color: #555; cursor: pointer; outline: none; }
+        .money-input { width: 60px; border: none; border-bottom: 1px dashed #ddd; text-align: right; font-weight: bold; font-size: 15px; color: var(--accent); outline: none; }
+        
+        .status-bar { position: absolute; bottom: 0; left: 0; width: 100%; height: 32px; background: #f8f9fa; border-top: 1px solid #eee; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #999; font-weight: 500; }
+
+        .main { flex: 1; display: flex; flex-direction: column; background: #F0F2F5; position: relative; }
+        .workspace { flex: 1; overflow: auto; padding: 60px 40px; display: flex; flex-direction: column; align-items: center; gap: 30px; }
+        
+        .paper { width: 210mm; background: #fff; padding: 20mm; box-shadow: 0 10px 30px rgba(0,0,0,0.08); flex-shrink: 0; }
+        .a4-page { width: 210mm; height: 297mm; display: flex; flex-direction: column; position: relative; margin-bottom: 30px; padding: 0; overflow: hidden; }
+        .report-paper { min-height: 297mm; height: auto; }
+        
+        .half-page { height: 148.5mm; width: 100%; border-bottom: 1px dashed #ddd; display: flex; align-items: center; justify-content: center; padding: 10px; position: relative; overflow: hidden; }
+        .half-page:last-child { border-bottom: none; }
+        .half-page img { max-width: 95%; max-height: 90%; object-fit: contain; }
+        .cut-text { position: absolute; bottom: -10px; right: 10px; background: #fff; color: #ccc; font-size: 10px; padding: 0 5px; }
+        .page-num { position: absolute; top: -25px; left: 0; color: #999; font-size: 12px; font-weight: bold; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; border: 2px solid #000; }
+        th { text-align: center; color: #000; font-size: 14px; padding: 12px; border: 1px solid #000; background: #f8f8f8; font-weight: bold; }
+        td { padding: 14px 12px; border: 1px solid #000; font-size: 14px; color: #000; }
+        .total-row td { background: #fafafa; font-weight: bold; }
+        .sign-area { margin-top: 80px; display: flex; justify-content: space-between; padding: 0 10px; font-size: 14px; color: #000; }
+        .sign-item { border-top: 1px solid #000; padding-top: 10px; width: 150px; text-align: center; }
+
+        #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); background: rgba(0,0,0,0.7); color: white; padding: 12px 24px; border-radius: 6px; display: none; font-size: 12px; z-index: 99; }
+        #err-bar { position: fixed; top: 0; left: 0; width: 100%; background: #ff4d4f; color: white; text-align: center; padding: 8px; z-index: 99999; display: none; font-size: 12px; }
+
+        @media print {
+            @page { margin: 0; size: A4; }
+            .sidebar, .top-bar, #err-bar, #loading, .page-num { display: none !important; }
+            body, #app, .main, .workspace { background: white !important; width: 100% !important; height: auto !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; display: block !important; box-shadow: none !important; border: none !important; }
+            .paper { box-shadow: none !important; margin: 0 auto !important; width: 210mm !important; max-width: 210mm; padding: 0 !important; page-break-after: always; }
+            .paper:last-child, .a4-page:last-child { page-break-after: auto !important; }
+            
+            /* 🔥 修复2：打印时强制给报销单增加 20mm 的边距，不再顶格 */
+            .report-paper { padding: 20mm !important; min-height: 0 !important; }
+            
+            .half-page { border-bottom: 1px dashed #ccc !important; height: 148.5mm !important; }
+            .cut-text { display: none !important; }
+        }
+    </style>
+</head>
+<body>
+
+<svg style="display: none;">
+    <symbol id="icon-box" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6H4V4H20V6ZM21 19V8H3V19H21ZM3 21C2.45 21 2 20.55 2 20V8C2 7.45 2.45 7 3 7H21C21.55 7 22 7.45 22 8V20C22 20.55 21.55 21 21 21H3ZM12 12L16 16H8L12 12Z"/></symbol>
+    <symbol id="icon-del" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></symbol>
+    <symbol id="icon-print" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></symbol>
+</svg>
+
+<div id="err-bar"></div>
+<div id="loading">生成中...</div>
+
+<div id="app" v-cloak>
+    <div class="sidebar">
+        <div class="brand-row">
+            <div class="brand"><svg><use xlink:href="#icon-box"></use></svg> InvoiceBox V5.7</div>
+            <div class="btn-clear" @click="clearAll"><svg width="14" height="14"><use xlink:href="#icon-del"></use></svg> 清空</div>
+        </div>
+        <div class="upload-area" @click="$refs.file.click()">
+            <span v-if="!uploading">+ 拖入发票 PDF / OFD</span><span v-else style="color:var(--accent)">正在分析...</span>
+        </div>
+        <input type="file" ref="file" multiple style="display:none" @change="handleUpload">
+        <div class="list" @dragover.prevent>
+            <div v-if="list.length===0" style="text-align:center; color:#ccc; font-size:12px; margin-top:40px;">暂无发票</div>
+            <div v-for="(item, idx) in list" :key="item.id" 
+                 class="card" draggable="true"
+                 @click="scrollToPage(idx)"
+                 @dragstart="dragStart(idx)" @dragenter="dragEnter(idx)" @dragend="dragEnd"
+                 :class="{dragging: dragIdx===idx}">
+                <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
+                    <select v-model="item.category" class="tag-select" @change="update(item)" @click.stop>
+                        <option v-for="opt in ['交通','行程单','住宿','餐饮','火车票','机票','办公','其他']" :value="opt">{{opt}}</option>
+                    </select>
+                    <i style="cursor:pointer; color:#ddd; font-style:normal;" @click.stop="del(item.id)">×</i>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-size:12px; width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" :title="item.display_name">{{ item.display_name || '(未命名)' }}</span>
+                    <div><span style="font-size:12px; color:#999;">¥</span> <input v-model="item.amount" @blur="update(item)" class="money-input" @click.stop></div>
+                </div>
+            </div>
+        </div>
+        <div class="status-bar">共 {{ list.length }} 项发票</div>
+    </div>
+
+    <div class="main">
+        <div class="top-bar">
+            <div style="width:100px"></div>
+            <div class="seg-ctrl">
+                <div class="seg-item" :class="{active: view==='preview'}" @click="changeView('preview')">拼图预览</div>
+                <div class="seg-item" :class="{active: view==='report'}" @click="changeView('report')">报销单</div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-print" @click="doPrint"><svg><use xlink:href="#icon-print"></use></svg> 打印</button>
+                <button class="btn btn-dl" @click="doDownload"><svg><use xlink:href="#icon-download"></use></svg> 下载</button>
+            </div>
+        </div>
+
+        <div class="workspace">
+            <template v-if="view==='preview'">
+                <div v-for="(page, idx) in pages" :key="idx" :id="'page-'+idx" class="paper a4-page">
+                    <div class="page-num">第 {{ idx + 1 }} 页</div>
+                    <div class="half-page"><img v-if="page[0]" :src="page[0]"></div>
+                    <div class="half-page">
+                        <img v-if="page[1]" :src="page[1]">
+                        <div class="cut-text" v-if="page[1]">--- 沿虚线裁剪 ---</div>
+                    </div>
+                </div>
+                <div v-if="list.length===0" style="color:#999; margin-top:100px;">请在左侧添加发票</div>
+            </template>
+            
+            <div v-if="view==='report'" class="paper report-paper">
+                <h2 style="text-align:center; margin-bottom:40px;">费用报销单</h2>
+                <div style="display:flex; justify-content:space-between; font-size:14px; margin-bottom:10px; padding:0 5px;">
+                    <span><b>申请日期：</b>{{ today }}</span>
+                    <span><b>附件张数：</b>{{ list.length }} 张</span>
+                </div>
+                <table>
+                    <thead><tr><th>费用类别</th><th>单据数量</th><th style="text-align:right">金额 (RMB)</th></tr></thead>
+                    <tbody>
+                        <tr v-for="(g, k) in grouped" :key="k">
+                            <td style="text-align:center">{{ k }}</td>
+                            <td style="text-align:center">{{ g.count }}</td>
+                            <td style="text-align:right; font-family:monospace; padding-right:20px;">{{ g.total.toFixed(2) }}</td>
+                        </tr>
+                        <tr class="total-row">
+                            <td style="text-align:center">合计</td>
+                            <td></td>
+                            <td style="text-align:right; padding-right:20px;">¥ {{ total.toFixed(2) }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div style="margin-top:20px; font-size:14px; font-weight:bold; padding:0 5px;">金额大写：{{ digitUppercase(total) }}</div>
+                <div class="sign-area">
+                    <div class="sign-item">报销申请人</div>
+                    <div class="sign-item">部门负责人</div>
+                    <div class="sign-item">财务审核</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    window.onerror = function(msg) { 
+        document.getElementById('err-bar').style.display='block'; 
+        document.getElementById('err-bar').innerText = "错误: " + msg; 
+    }
+
+    const { createApp, ref, computed, onMounted } = Vue;
+    const { Delete, Box } = ElementPlusIconsVue;
+
+    createApp({
+        setup() {
+            const list = ref([]);
+            const view = ref('preview');
+            const uploading = ref(false);
+            const pages = ref([]);
+            const dragIdx = ref(-1);
+
+            const load = async () => { try{ const res = await fetch('/api/init'); list.value = (await res.json()).invoices; refreshPreview(); }catch(e){} };
+            
+            const handleUpload = async (e) => {
+                uploading.value = true;
+                for(let file of e.target.files) {
+                    const fd = new FormData(); fd.append('file', file);
+                    const res = await fetch('/api/upload', {method:'POST', body:fd});
+                    if(res.status===400) {
+                        const err = await res.json();
+                        if(err.code==='DUPLICATE') alert('🚫 重复文件：'+file.name);
+                        continue;
+                    }
+                    list.value.push(await res.json());
+                }
+                uploading.value = false; e.target.value = '';
+                refreshPreview();
+            };
+
+            const refreshPreview = async () => {
+                if(list.value.length === 0) { pages.value = []; return; }
+                if(view.value === 'preview') {
+                    document.getElementById('loading').style.display = 'block';
+                    const ids = list.value.map(i => i.id);
+                    const res = await fetch('/api/render_pages', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids})});
+                    const data = await res.json();
+                    const newPages = [];
+                    for(let i=0; i<data.images.length; i+=2) newPages.push([data.images[i], data.images[i+1] || null]);
+                    pages.value = newPages;
+                    document.getElementById('loading').style.display = 'none';
+                }
+            };
+
+            const changeView = (v) => { view.value = v; if(v === 'preview') refreshPreview(); };
+            const update = async (item) => { await fetch('/api/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(item)}); };
+            const del = async (id) => {
+                if(!confirm('删除?')) return;
+                await fetch('/api/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id})});
+                list.value = list.value.filter(i => i.id !== id);
+                refreshPreview();
+            };
+            const clearAll = async () => { if(!confirm('清空?')) return; await fetch('/api/clear', {method:'POST'}); list.value = []; pages.value = []; };
+            
+            const doPrint = () => window.print();
+            const doDownload = async () => {
+                document.getElementById('loading').innerText = "生成 PDF 中...";
+                document.getElementById('loading').style.display = 'block';
+                const ids = list.value.map(i => i.id);
+                const res = await fetch('/api/download_pdf', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids})});
+                const data = await res.json();
+                document.getElementById('loading').style.display = 'none';
+                window.open(data.url);
+            };
+
+            const scrollToPage = (idx) => {
+                if (view.value !== 'preview') return;
+                const pageIdx = Math.floor(idx / 2);
+                const el = document.getElementById('page-' + pageIdx);
+                if(el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            };
+
+            const grouped = computed(() => {
+                const g = {}; list.value.forEach(i => { 
+                    if(i.category==='行程单') return;
+                    const c = i.category||'其他'; 
+                    if(!g[c]) g[c]={count:0,total:0}; 
+                    // 核心逻辑保留：防NaN
+                    let amt = parseFloat(i.amount);
+                    if(isNaN(amt)) amt = 0;
+                    g[c].count++; g[c].total+=amt; 
+                }); 
+                return g;
+            });
+            
+            const total = computed(() => list.value.reduce((s,i) => {
+                if(i.category==='行程单') return s;
+                let amt = parseFloat(i.amount);
+                if(isNaN(amt)) amt = 0;
+                return s + amt;
+            }, 0));
+
+            const dragStart = (i) => dragIdx.value = i;
+            const dragEnter = (i) => { if (dragIdx.value !== i) { const item = list.value[dragIdx.value]; list.value.splice(dragIdx.value, 1); list.value.splice(i, 0, item); dragIdx.value = i; } };
+            const dragEnd = () => { dragIdx.value = -1; refreshPreview(); };
+
+            const digitUppercase = (n) => { 
+                n = parseFloat(n); if(isNaN(n)) n = 0;
+                if(n==0)return'零元整'; const u='仟佰拾亿仟佰拾万仟佰拾元角分'; let s=''; n=n.toFixed(2); n+="00"; const p=n.indexOf('.'); if(p>=0)n=n.substring(0,p)+n.substr(p+1,2); u.substr(u.length-n.length); for(let i=0;i<n.length;i++)s+='零壹贰叁肆伍陆柒捌玖'.charAt(n.charAt(i))+u.charAt(i); return s.replace(/零(仟|佰|拾|角)/g,"零").replace(/(零)+/g,"零").replace(/零(万|亿|元)/g,"$1").replace(/(亿)万|壹(拾)/g,"$1$2").replace(/^元零?|零分/g,"").replace(/元$/g,"元整"); 
+            };
+
+            onMounted(load);
+            setInterval(() => { fetch('/api/heartbeat').catch(() => {}); }, 1000);
+            return { list, view, uploading, pages, handleUpload, update, del, clearAll, grouped, total, changeView, doPrint, doDownload, dragStart, dragEnter, dragEnd, dragIdx, scrollToPage, today: new Date().toLocaleDateString(), digitUppercase };
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
