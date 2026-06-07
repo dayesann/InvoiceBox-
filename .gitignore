@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.claude/
+.codenomad/
+
+build/
+dist/
+invoices/
+database.json
+server_out.txt
+server_err.txt
+
+*.tmp
+*.corrupt-*
