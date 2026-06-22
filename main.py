@@ -1,10 +1,13 @@
 import os, sys, json, uuid, datetime, re, threading, webbrowser, time, base64, zipfile, hashlib
 import mimetypes
 import io
+import shutil
+import tempfile
 import fitz  # PyMuPDF
 from PIL import Image
 from easyofd import OFD
 from flask import Flask, request, jsonify, send_file, Response, make_response
+from classifier import classify as classify_invoice, load_user_rules, record_user_correction, extract_fields
 
 # 1. 基础配置
 mimetypes.add_type('application/javascript', '.js')
@@ -25,7 +28,20 @@ TEMPLATE_DIR = os.path.join(INTERNAL_DIR, 'templates')
 STATIC_DIR = os.path.join(INTERNAL_DIR, 'static')
 UPLOAD_DIR = os.path.join(DATA_DIR, 'invoices')
 DB_FILE = os.path.join(DATA_DIR, 'database.json')
+SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
+BACKUP_DIR = os.path.join(DATA_DIR, 'backups')
 MERGED_PDF = os.path.join(UPLOAD_DIR, 'merged_preview.pdf')
+APP_VERSION = "6.2"
+
+DEFAULT_SETTINGS = {
+    "company_name": "",
+    "report_title": "费用报销单",
+    "currency_symbol": "¥",
+    "categories": ["交通", "公共交通", "打车费", "行程单", "住宿", "餐饮", "火车票", "机票", "专票", "办公", "邮寄费", "其他"],
+    "special_categories": ["机票", "火车票", "住宿", "公共交通"],
+    "excluded_report_categories": ["行程单"],
+    "duplicate_special": False,
+}
 
 if not os.path.exists(UPLOAD_DIR): os.makedirs(UPLOAD_DIR)
 
@@ -66,17 +82,90 @@ def load_db():
             return {"invoices": []}
 
 def save_db(data):
+    with db_lock: _save_json_atomic(DB_FILE, data)
+
+def _save_json_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_file = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(tmp_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        os.replace(tmp_file, path)
+    finally:
+        if os.path.exists(tmp_file):
+            try: os.remove(tmp_file)
+            except: pass
+
+def normalize_settings(data):
+    raw = data if isinstance(data, dict) else {}
+    settings = dict(DEFAULT_SETTINGS)
+    settings["company_name"] = str(raw.get("company_name", "")).strip()[:80]
+    settings["report_title"] = str(raw.get("report_title", DEFAULT_SETTINGS["report_title"])).strip()[:40] or DEFAULT_SETTINGS["report_title"]
+    settings["currency_symbol"] = str(raw.get("currency_symbol", DEFAULT_SETTINGS["currency_symbol"])).strip()[:4] or DEFAULT_SETTINGS["currency_symbol"]
+    categories = []
+    for value in raw.get("categories", DEFAULT_SETTINGS["categories"]):
+        name = str(value).strip()[:20]
+        if name and name not in categories: categories.append(name)
+        if len(categories) >= 30: break
+    if not categories: categories = list(DEFAULT_SETTINGS["categories"])
+    if "其他" not in categories: categories.append("其他")
+    settings["categories"] = categories
+    special = raw.get("special_categories", DEFAULT_SETTINGS["special_categories"])
+    excluded = raw.get("excluded_report_categories", DEFAULT_SETTINGS["excluded_report_categories"])
+    settings["special_categories"] = [c for c in categories if c in special]
+    settings["excluded_report_categories"] = [c for c in categories if c in excluded]
+    settings["duplicate_special"] = bool(raw.get("duplicate_special", DEFAULT_SETTINGS["duplicate_special"]))
+    return settings
+
+def load_settings():
     with db_lock:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp_file = f"{DB_FILE}.{uuid.uuid4().hex}.tmp"
+        if not os.path.exists(SETTINGS_FILE): return dict(DEFAULT_SETTINGS)
         try:
-            with open(tmp_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            os.replace(tmp_file, DB_FILE)
-        finally:
-            if os.path.exists(tmp_file):
-                try: os.remove(tmp_file)
-                except: pass
+            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return normalize_settings(json.load(f))
+        except Exception as e:
+            backup = f"{SETTINGS_FILE}.corrupt-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+            try:
+                os.replace(SETTINGS_FILE, backup)
+                print(f"设置读取失败，已备份到 {backup}: {e}")
+            except Exception as backup_err:
+                print(f"设置读取失败，备份也失败: {e}; {backup_err}")
+            return dict(DEFAULT_SETTINGS)
+
+def save_settings(data):
+    settings = normalize_settings(data)
+    with db_lock: _save_json_atomic(SETTINGS_FILE, settings)
+    return settings
+
+def write_backup_archive(target):
+    db = load_db()
+    settings = load_settings()
+    manifest = {"product": "InvoiceBox", "version": APP_VERSION, "exported_at": datetime.datetime.now().isoformat(timespec="seconds"), "invoice_count": len(db["invoices"])}
+    with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        z.writestr("database.json", json.dumps(db, ensure_ascii=False, indent=2))
+        z.writestr("settings.json", json.dumps(settings, ensure_ascii=False, indent=2))
+        for item in db["invoices"]:
+            name = os.path.basename(str(item.get("name", "")))
+            path = os.path.join(UPLOAD_DIR, name)
+            if name and os.path.isfile(path): z.write(path, f"invoices/{name}")
+
+def validate_restore_archive(archive):
+    names = set(archive.namelist())
+    if "database.json" not in names: raise ValueError("备份包缺少 database.json")
+    for name in names:
+        normalized = name.replace("\\", "/")
+        if normalized.startswith("/") or ".." in normalized.split("/"): raise ValueError("备份包包含不安全路径")
+    db = json.loads(archive.read("database.json").decode("utf-8"))
+    if not isinstance(db, dict) or not isinstance(db.get("invoices"), list): raise ValueError("备份中的数据库格式不正确")
+    settings = dict(DEFAULT_SETTINGS)
+    if "settings.json" in names: settings = normalize_settings(json.loads(archive.read("settings.json").decode("utf-8")))
+    for item in db["invoices"]:
+        if not isinstance(item, dict): raise ValueError("备份中的发票记录格式不正确")
+        name = str(item.get("name", ""))
+        if not name or name != os.path.basename(name): raise ValueError("备份中存在无效文件名")
+        if f"invoices/{name}" not in names: raise ValueError(f"备份包缺少发票文件: {name}")
+    return db, settings
 
 def calculate_md5(file_path):
     hash_md5 = hashlib.md5()
@@ -170,7 +259,9 @@ LATIN_STATION = {
 }
 
 def smart_ocr(path):
-    info = {"amount": 0.0, "category": "其他", "date_start": "", "date_end": "", "route": ""}
+    info = {"amount": 0.0, "category": "其他", "date_start": "", "date_end": "", "route": "",
+            "document_type": "", "confidence": 0.0, "matched_evidence": [],
+            "risk_points": [], "needs_manual_review": True, "seller_name": ""}
     text = ""
     try:
         if path.lower().endswith('.ofd'): text = read_ofd_source(path)
@@ -181,15 +272,17 @@ def smart_ocr(path):
         # 预处理：去除空格用于关键词匹配和日期提取
         clean_txt = text.replace(" ", "").replace("¥", "￥").replace("CNY", "￥").replace("\n", "")
 
-        # 分类识别
-        if '行程单' in clean_txt and ('机票' in clean_txt or '航空' in clean_txt or '航班' in clean_txt or '民航' in clean_txt or '旅客' in clean_txt):
-            info['category'] = '机票'
-        elif '火车' in clean_txt or '铁路' in clean_txt or 'G1' in clean_txt: info['category'] = '火车票'
-        elif '航空运输' in clean_txt or '客票' in clean_txt: info['category'] = '机票'
-        elif '行程单' in clean_txt: info['category'] = '行程单'
-        elif '客运' in clean_txt or '运输服务' in clean_txt or '通行费' in clean_txt: info['category'] = '交通'
-        elif '餐饮' in clean_txt or '美食' in clean_txt: info['category'] = '餐饮'
-        elif '酒店' in clean_txt or '住宿' in clean_txt: info['category'] = '住宿'
+        # 多证据加权分类
+        user_rules = load_user_rules(DATA_DIR)
+        result = classify_invoice(clean_txt, text, user_rules)
+        info['category'] = result['expense_category']
+        info['document_type'] = result['document_type']
+        info['confidence'] = result['confidence']
+        info['matched_evidence'] = result['matched_evidence']
+        info['risk_points'] = result['risk_points']
+        info['needs_manual_review'] = result['needs_manual_review']
+        fields = extract_fields(clean_txt, text)
+        info['seller_name'] = fields.get('seller_name', '')
 
         # 日期提取
         if info['category'] == '住宿':
@@ -297,20 +390,42 @@ def smart_ocr(path):
     except: return info
 
 def _build_layout(ids, duplicate_special=False):
-    """构建页面布局：专票竖版A4独占一页，普票2张拼一页"""
+    """构建页面布局：专票竖版A4独占一页，普票2张拼一页；
+    公共交通与行程单金额一致时配对拼页。"""
     db = load_db()
+    settings = load_settings()
     fmap = {i['id']: i['name'] for i in db['invoices']}
     cat_map = {i['id']: i.get('category', '') for i in db['invoices']}
-    special_cats = {'机票', '火车票', '住宿'}
+    amt_map = {i['id']: round(float(i.get('amount', 0)), 2) for i in db['invoices']}
+    doc_type_map = {i['id']: i.get('document_type', '') for i in db['invoices']}
+    special_cats = set(settings.get("special_categories", []))
     W, H = 595, 842
     MARGIN = 40
     special_rect = fitz.Rect(MARGIN, MARGIN, W - MARGIN, H - MARGIN)
     normal_rects = [fitz.Rect(20, 20, W-20, H/2 - 10), fitz.Rect(20, H/2 + 10, W-20, H-20)]
 
-    pages = []  # [[(fpath, rect), ...], ...]
+    # 发票 ↔ 行程单 金额+类型配对
+    # 打车费 ↔ 打车行程单，公共交通 ↔ 地铁行程单
+    PAIR_RULES = {'打车费': '打车', '公共交通': '地铁'}
+    pair_of = {}
+    for inv_id in ids:
+        cat = cat_map.get(inv_id, '')
+        if cat in PAIR_RULES and inv_id not in pair_of:
+            target_amt = amt_map.get(inv_id, -1)
+            hint = PAIR_RULES[cat]
+            for nid in ids:
+                if nid == inv_id or nid in pair_of: continue
+                if cat_map.get(nid) == '行程单' and amt_map.get(nid, -2) == target_amt:
+                    if hint in doc_type_map.get(nid, ''):
+                        pair_of[inv_id] = nid
+                        pair_of[nid] = inv_id
+                        break
+
+    pages = []
     page_map = {}
     normal_buf = []
     normal_buf_ids = []
+    paired_done = set()
 
     def flush_normals(buf, buf_ids):
         for i in range(0, len(buf), 2):
@@ -323,12 +438,24 @@ def _build_layout(ids, duplicate_special=False):
 
     for inv_id in ids:
         if inv_id not in fmap: continue
+        if inv_id in paired_done: continue
         fpath = os.path.join(UPLOAD_DIR, fmap[inv_id])
-        if cat_map.get(inv_id) in special_cats:
+        partner_id = pair_of.get(inv_id)
+
+        if partner_id:
             if normal_buf:
                 flush_normals(normal_buf, normal_buf_ids)
-                normal_buf = []
-                normal_buf_ids = []
+                normal_buf = []; normal_buf_ids = []
+            partner_fpath = os.path.join(UPLOAD_DIR, fmap[partner_id])
+            page_map[inv_id] = len(pages)
+            page_map[partner_id] = len(pages)
+            pages.append([(fpath, normal_rects[0]), (partner_fpath, normal_rects[1])])
+            paired_done.add(inv_id)
+            paired_done.add(partner_id)
+        elif cat_map.get(inv_id) in special_cats:
+            if normal_buf:
+                flush_normals(normal_buf, normal_buf_ids)
+                normal_buf = []; normal_buf_ids = []
             page_map[inv_id] = len(pages)
             pages.append([(fpath, special_rect)])
             if duplicate_special:
@@ -339,8 +466,7 @@ def _build_layout(ids, duplicate_special=False):
             normal_buf_ids.append(inv_id)
             if len(normal_buf) == 2:
                 flush_normals(normal_buf, normal_buf_ids)
-                normal_buf = []
-                normal_buf_ids = []
+                normal_buf = []; normal_buf_ids = []
 
     if normal_buf:
         flush_normals(normal_buf, normal_buf_ids)
@@ -403,7 +529,18 @@ def download_pdf():
     return jsonify({"url": "/file/merged_preview.pdf"})
 
 @app.route('/api/init')
-def init(): return jsonify(load_db())
+def init():
+    data = load_db()
+    data["settings"] = load_settings()
+    return jsonify(data)
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def settings_api():
+    if request.method == 'GET':
+        return jsonify(load_settings())
+    payload = request.get_json(silent=True) or {}
+    result = save_settings(payload)
+    return jsonify(result)
 
 @app.route('/api/upload', methods=['POST'])
 def upload():
@@ -426,6 +563,9 @@ def upload():
                 return jsonify({"error": "重复文件", "code": "DUPLICATE"}), 400
 
         info = smart_ocr(path)
+        current_settings = load_settings()
+        if info.get("category") not in current_settings.get("categories", []):
+            info["category"] = "其他"
 
         final = name; disp = f.filename
         if ext == 'ofd':
@@ -441,7 +581,16 @@ def upload():
             else:
                 os.remove(path)
                 return jsonify({"error": "OFD文件转换失败，请检查文件格式"}), 400
-        item = {"id": str(uuid.uuid4()), "name": final, "display_name": disp, "amount": info['amount'], "category": info['category'], "date": datetime.datetime.now().strftime("%Y-%m-%d"), "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''), "route": info.get('route', ''), "md5": cur_md5}
+        item = {"id": str(uuid.uuid4()), "name": final, "display_name": disp, "amount": info['amount'],
+                "category": info['category'], "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
+                "route": info.get('route', ''), "md5": cur_md5,
+                "document_type": info.get("document_type", ""),
+                "confidence": info.get("confidence", 0),
+                "matched_evidence": info.get("matched_evidence", []),
+                "risk_points": info.get("risk_points", []),
+                "needs_manual_review": info.get("needs_manual_review", False),
+                "seller_name": info.get("seller_name", "")}
         db['invoices'].append(item)
         save_db(db)
         return jsonify(item)
@@ -454,13 +603,42 @@ def upload():
 @app.route('/api/update', methods=['POST'])
 def update():
     d = request.json
+    if 'category' in d:
+        valid_cats = load_settings().get('categories', [])
+        if d['category'] not in valid_cats:
+            return jsonify({"error": "无效的发票分类"}), 400
     db = load_db()
     for i in db['invoices']:
         if i['id'] == d['id']:
+            # Record user correction if category changed
+            if 'category' in d and d['category'] != i.get('category'):
+                record_user_correction(
+                    DATA_DIR,
+                    seller_name=i.get('seller_name', ''),
+                    title=i.get('document_type', ''),
+                    original_category=i.get('category', ''),
+                    correct_category=d['category'],
+                )
+                i['needs_manual_review'] = False
+                i['confidence'] = 1.0
             i.update(d)
             break
     save_db(db)
     return jsonify("ok")
+
+@app.route('/api/learn_category', methods=['POST'])
+def learn_category():
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("correct_category"):
+        return jsonify({"error": "缺少 correct_category"}), 400
+    record_user_correction(
+        DATA_DIR,
+        seller_name=payload.get("seller_name", ""),
+        title=payload.get("title", ""),
+        original_category=payload.get("original_category", ""),
+        correct_category=payload["correct_category"],
+    )
+    return jsonify({"ok": True})
 
 @app.route('/api/delete', methods=['POST'])
 def delete():

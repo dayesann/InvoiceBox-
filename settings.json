@@ -1,0 +1,29 @@
+{
+    "company_name": "",
+    "report_title": "差旅费用报销单",
+    "currency_symbol": "¥",
+    "categories": [
+        "交通",
+        "公共交通",
+        "打车费",
+        "行程单",
+        "住宿",
+        "餐饮",
+        "火车票",
+        "机票",
+        "专票",
+        "办公",
+        "邮寄费",
+        "其他"
+    ],
+    "special_categories": [
+        "公共交通",
+        "住宿",
+        "火车票",
+        "机票"
+    ],
+    "excluded_report_categories": [
+        "行程单"
+    ],
+    "duplicate_special": false
+}

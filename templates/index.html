@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>InvoiceBox V6.1</title>
+    <title>InvoiceBox V6.2</title>
     <link rel="stylesheet" href="/static/index.min.css" />
     <script src="/static/vue.global.js"></script>
     <script src="/static/index.full.js"></script>
@@ -102,6 +102,16 @@
         @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(10px); } }
 
+        .settings-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.3); z-index:999; }
+        .settings-drawer { position:fixed; top:0; right:0; width:380px; height:100%; background:#fff; box-shadow:-4px 0 20px rgba(0,0,0,0.15); z-index:1000; padding:24px; overflow-y:auto; }
+        .settings-drawer h3 { margin:0 0 20px 0; font-size:16px; display:flex; justify-content:space-between; align-items:center; }
+        .settings-section { margin-bottom:20px; }
+        .settings-section label { font-size:12px; color:#666; display:block; margin-bottom:6px; font-weight:600; }
+        .settings-section input[type="text"] { width:100%; border:1px solid #E5E6EB; border-radius:6px; padding:8px 10px; font-size:13px; outline:none; box-sizing:border-box; }
+        .settings-section input[type="text"]:focus { border-color:#007AFF; }
+        .cat-chip { font-size:12px; background:#f0f0f0; padding:4px 10px; border-radius:6px; display:inline-flex; align-items:center; gap:4px; margin:0 4px 4px 0; }
+        .cat-chip .del { cursor:pointer; color:#ccc; font-style:normal; font-size:14px; } .cat-chip .del:hover { color:#ff3b30; }
+
         @media print {
             @page { margin: 0; size: A4; }
             .sidebar, .top-bar, #err-bar, #loading, #print-overlay, .page-num, .modal-overlay { display: none !important; }
@@ -134,7 +144,7 @@
 <div id="app" v-cloak>
     <div class="sidebar">
         <div class="brand-row">
-            <div class="brand"><svg><use xlink:href="#icon-box"></use></svg> InvoiceBox V6.1</div>
+            <div class="brand"><svg><use xlink:href="#icon-box"></use></svg> InvoiceBox V6.2</div>
             <div class="btn-clear" @click="clearAll"><svg width="14" height="14"><use xlink:href="#icon-del"></use></svg> 清空</div>
         </div>
         <div class="upload-area" @click="$refs.file.click()" @dragover.prevent="dragOver=true" @dragleave="dragOver=false" @drop.prevent="handleDrop($event)" :class="{'drag-over': dragOver}">
@@ -145,18 +155,7 @@
             <input v-model="searchText" placeholder="搜索文件名/路线..." @click.stop>
             <select v-model="filterCat" @click.stop>
                 <option value="">全部</option>
-                <option v-for="opt in ['交通','行程单','住宿','餐饮','火车票','机票','专票','办公','其他']" :value="opt">{{opt}}</option>
-            </select>
-        </div>
-        <div class="sort-bar" v-if="list.length > 0">
-            <span>共 {{ filteredList.length }} 项</span>
-            <select v-model="sortBy" @click.stop>
-                <option value="default">默认排序</option>
-                <option value="amount-desc">金额 ↓</option>
-                <option value="amount-asc">金额 ↑</option>
-                <option value="date-desc">日期 ↓</option>
-                <option value="date-asc">日期 ↑</option>
-                <option value="name">文件名</option>
+                <option v-for="opt in settings.categories" :key="opt" :value="opt">{{opt}}</option>
             </select>
         </div>
         <div class="list" @dragover.prevent>
@@ -167,9 +166,15 @@
                  @dragstart="dragStart(item.id)" @dragenter="dragEnter(item.id)" @dragend="dragEnd"
                  :class="{dragging: dragIdx===item.id}">
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                    <select v-model="item.category" class="tag-select" @change="update(item); refreshPreview()" @click.stop>
-                        <option v-for="opt in ['交通','行程单','住宿','餐饮','火车票','机票','专票','办公','其他']" :value="opt">{{opt}}</option>
-                    </select>
+                    <div style="display:flex; align-items:center; gap:4px;">
+                        <select v-model="item.category" class="tag-select" @change="onCategoryChange(item)" @click.stop>
+                            <option v-for="opt in settings.categories" :key="opt" :value="opt">{{opt}}</option>
+                        </select>
+                        <span v-if="item.needs_manual_review" style="font-size:10px; color:#e6a23c; background:#fdf6ec; padding:0 4px; border-radius:3px; white-space:nowrap;">需确认</span>
+                        <span v-else-if="item.confidence >= 0.9" style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#67c23a;" title="高置信度"></span>
+                        <span v-else-if="item.confidence >= 0.7" style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#e6a23c;" title="中置信度"></span>
+                        <span v-else-if="item.confidence > 0" style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#f56c6c;" title="低置信度"></span>
+                    </div>
                     <i style="cursor:pointer; color:#ccc; font-style:normal; font-size:16px; line-height:1;" @click.stop="del(item)" title="删除">×</i>
                 </div>
                 <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -193,9 +198,7 @@
                 <div class="seg-item" :class="{active: view==='report'}" @click="changeView('report')">报销单</div>
             </div>
             <div class="actions">
-                <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#666;cursor:pointer;user-select:none;">
-                    <input type="checkbox" v-model="dupSpecial" style="cursor:pointer;"> 专票×2
-                </label>
+                <button class="btn btn-print" @click="settingsOpen=!settingsOpen"><svg><use xlink:href="#icon-box"></use></svg> 设置</button>
                 <button class="btn btn-print" @click="doPrint"><svg><use xlink:href="#icon-print"></use></svg> 打印</button>
                 <button class="btn btn-dl" @click="doDownload"><svg><use xlink:href="#icon-download"></use></svg> 下载</button>
             </div>
@@ -211,9 +214,12 @@
             </template>
             
             <div v-if="view==='report'" class="paper report-paper">
-                <h2 style="text-align:center; margin-bottom:40px;">费用报销单</h2>
+                <h2 style="text-align:center; margin-bottom:40px;">
+                    <input v-model="settings.report_title" @blur="saveReportTitle" style="text-align:center; border:none; border-bottom:1px dashed #ccc; font-size:20px; font-weight:bold; width:200px; outline:none; background:transparent;">
+                </h2>
                 <div style="display:flex; justify-content:space-between; font-size:14px; margin-bottom:10px; padding:0 5px;">
                     <span><b>申请日期：</b>{{ today }}</span>
+                    <span><b>申请人：</b><input v-model="applicant" style="border:none; border-bottom:1px dashed #ccc; width:80px; font-size:14px; outline:none; background:transparent;"></span>
                     <span><b>附件张数：</b>{{ list.length }} 张</span>
                 </div>
                 <table>
@@ -251,6 +257,38 @@
             </div>
         </div>
     </div>
+    <div class="settings-overlay" v-if="settingsOpen" @click="settingsOpen=false">
+        <div class="settings-drawer" @click.stop>
+            <h3>设置 <i style="cursor:pointer; color:#999; font-style:normal;" @click="settingsOpen=false">✕</i></h3>
+            <div class="settings-section">
+                <label>报销单标题</label>
+                <input type="text" v-model="settings.report_title" @blur="saveReportTitle">
+            </div>
+            <div class="settings-section">
+                <label>报销申请人</label>
+                <input type="text" v-model="applicant" placeholder="请输入姓名">
+            </div>
+            <div class="settings-section">
+                <label style="margin-bottom:8px;">单页打印（专票×2）</label>
+                <label style="font-size:13px; font-weight:normal; cursor:pointer;">
+                    <input type="checkbox" v-model="dupSpecial" style="cursor:pointer;"> 专票勾选后单页打印2份
+                </label>
+            </div>
+            <div class="settings-section">
+                <label>发票标签</label>
+                <div style="display:flex; gap:6px; margin-bottom:10px;">
+                    <input type="text" v-model="newCategory" placeholder="输入新标签名称" @keyup.enter="addCategory" style="flex:1;">
+                    <button @click="addCategory" style="border:none; background:#007AFF; color:#fff; border-radius:6px; padding:8px 16px; font-size:13px; cursor:pointer; white-space:nowrap;">添加</button>
+                </div>
+                <div>
+                    <span v-for="cat in settings.categories" :key="cat" class="cat-chip">
+                        {{cat}}
+                        <i v-if="cat !== '其他' && !list.some(i => i.category === cat)" class="del" @click="removeCategory(cat)">×</i>
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -285,8 +323,42 @@
             const modalTarget = ref(null);
             const dupSpecial = ref(localStorage.getItem('ib_dupSpecial') === 'true');
             const pageMap = ref({});
+            const settings = ref({
+                company_name: '', report_title: '费用报销单', currency_symbol: '¥',
+                categories: ['交通','公共交通','打车费','行程单','住宿','餐饮','火车票','机票','专票','办公','邮寄费','其他'],
+                special_categories: ['机票','火车票','住宿','公共交通'],
+                excluded_report_categories: ['行程单'], duplicate_special: false
+            });
+            const applicant = ref(localStorage.getItem('ib_applicant') || '');
+            const newCategory = ref('');
+            const settingsOpen = ref(false);
 
-            const load = async () => { try{ const res = await fetch('/api/init'); list.value = (await res.json()).invoices; refreshPreview(); }catch(e){} };
+            watch(applicant, (v) => { localStorage.setItem('ib_applicant', v); });
+
+            const saveReportTitle = async () => {
+                try {
+                    await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(settings.value)});
+                } catch(e) {}
+            };
+
+            const addCategory = async () => {
+                const name = newCategory.value.trim();
+                if(!name || name.length > 20) return;
+                if(settings.value.categories.includes(name)) { newCategory.value = ''; return; }
+                settings.value.categories.push(name);
+                newCategory.value = '';
+                await saveReportTitle();
+            };
+
+            const removeCategory = async (name) => {
+                if(name === '其他') return;
+                if(list.value.some(i => i.category === name)) return;
+                settings.value.categories = settings.value.categories.filter(c => c !== name);
+                settings.value.special_categories = settings.value.special_categories.filter(c => c !== name);
+                await saveReportTitle();
+            };
+
+            const load = async () => { try{ const res = await fetch('/api/init'); const data = await res.json(); list.value = data.invoices || []; if(data.settings) settings.value = data.settings; refreshPreview(); }catch(e){} };
 
             const doUpload = async (files) => {
                 uploading.value = true;
@@ -312,41 +384,20 @@
             const handleUpload = (e) => { doUpload(e.target.files); e.target.value = ''; };
             const handleDrop = (e) => { dragOver.value = false; doUpload(e.dataTransfer.files); };
 
+            const onCategoryChange = async (item) => {
+                await update(item);
+                refreshPreview();
+            };
+
             const refreshPreview = async () => {
                 if(list.value.length === 0) { pages.value = []; pageMap.value = {}; return; }
                 if(view.value === 'preview') {
                     document.getElementById('loading').style.display = 'block';
                     const ids = list.value.map(i => i.id);
-                    const specialCats = ['机票','火车票','住宿'];
-                    let pm = {}, pIdx = 0, normalBuf = [];
-                    for(const id of ids) {
-                        const item = list.value.find(i => i.id === id);
-                        if(!item) continue;
-                        if(specialCats.includes(item.category)) {
-                            for(let i = 0; i < normalBuf.length; i += 2) {
-                                pm[normalBuf[i]] = pIdx;
-                                if(i+1 < normalBuf.length) pm[normalBuf[i+1]] = pIdx;
-                                pIdx++;
-                            }
-                            normalBuf = [];
-                            pm[id] = pIdx; pIdx++;
-                        } else {
-                            normalBuf.push(id);
-                            if(normalBuf.length === 2) {
-                                pm[normalBuf[0]] = pIdx; pm[normalBuf[1]] = pIdx;
-                                pIdx++; normalBuf = [];
-                            }
-                        }
-                    }
-                    for(let i = 0; i < normalBuf.length; i += 2) {
-                        pm[normalBuf[i]] = pIdx;
-                        if(i+1 < normalBuf.length) pm[normalBuf[i+1]] = pIdx;
-                        pIdx++;
-                    }
                     const res = await fetch('/api/render_pages?t=' + Date.now(), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids, duplicate_special: dupSpecial.value})});
                     const data = await res.json();
                     pages.value = data.images.map(img => [img]);
-                    pageMap.value = data.page_map && Object.keys(data.page_map).length > 0 ? data.page_map : pm;
+                    pageMap.value = data.page_map || {};
                     document.getElementById('loading').style.display = 'none';
                 }
             };
@@ -444,11 +495,33 @@
 
             const digitUppercase = (n) => {
                 n = parseFloat(n); if(isNaN(n)) n = 0;
-                if(n==0)return'零元整'; const u='仟佰拾亿仟佰拾万仟佰拾元角分'; let s=''; n=n.toFixed(2); n+="00"; const p=n.indexOf('.'); if(p>=0)n=n.substring(0,p)+n.substr(p+1,2); u.substr(u.length-n.length); for(let i=0;i<n.length;i++)s+='零壹贰叁肆伍陆柒捌玖'.charAt(n.charAt(i))+u.charAt(i); return s.replace(/零(仟|佰|拾|角)/g,"零").replace(/(零)+/g,"零").replace(/零(万|亿|元)/g,"$1").replace(/(亿)万|壹(拾)/g,"$1$2").replace(/^元零?|零分/g,"").replace(/元$/g,"元整");
+                if(n===0) return '零元整';
+                const digits = '零壹贰叁肆伍陆柒捌玖';
+                const intPart = Math.floor(n);
+                const fracStr = n.toFixed(2).split('.')[1];
+                const jiao = parseInt(fracStr[0]), fen = parseInt(fracStr[1]);
+                let result = '';
+                if(intPart > 0) {
+                    const units = ['','','','亿','','','万','','',''];
+                    const s = String(intPart);
+                    const off = 10 - s.length;
+                    for(let i=0; i<s.length; i++) {
+                        const d = parseInt(s[i]);
+                        result += digits[d] + (d ? units[off+i] : '');
+                    }
+                    result = result.replace(/零+/g,'零').replace(/零(万|亿)/g,'$1').replace(/亿万/g,'亿');
+                    result += '元';
+                }
+                if(jiao===0 && fen===0) {
+                    result += '整';
+                } else {
+                    result += (jiao ? digits[jiao]+'角' : '') + (fen ? digits[fen]+'分' : '');
+                }
+                return result.replace(/零元/,'元').replace(/^元/,'').replace(/元整$/,'元整');
             };
 
             onMounted(load);
-            return { list, view, uploading, pages, handleUpload, handleDrop, dragOver, searchText, filterCat, sortBy, filteredList, update, del, clearAll, grouped, total, changeView, doPrint, doDownload, dragStart, dragEnter, dragEnd, dragIdx, scrollToPage, today: new Date().toLocaleDateString(), digitUppercase, modalType, modalTarget, confirmAction, pageMap, dupSpecial };
+            return { list, view, uploading, pages, handleUpload, handleDrop, dragOver, searchText, filterCat, sortBy, filteredList, update, del, clearAll, grouped, total, changeView, doPrint, doDownload, dragStart, dragEnter, dragEnd, dragIdx, scrollToPage, today: new Date().toLocaleDateString(), digitUppercase, modalType, modalTarget, confirmAction, pageMap, dupSpecial, settings, onCategoryChange, applicant, newCategory, addCategory, removeCategory, saveReportTitle, settingsOpen };
         }
     }).mount('#app');
 </script>
