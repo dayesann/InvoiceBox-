@@ -31,7 +31,7 @@ DB_FILE = os.path.join(DATA_DIR, 'database.json')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 BACKUP_DIR = os.path.join(DATA_DIR, 'backups')
 MERGED_PDF = os.path.join(UPLOAD_DIR, 'merged_preview.pdf')
-APP_VERSION = "6.3"
+APP_VERSION = "6.5"
 SCHEMA_VERSION = 2
 
 NEW_INVOICE_DEFAULTS = {
@@ -59,12 +59,127 @@ DEFAULT_SETTINGS = {
     "special_categories": ["机票", "火车票", "住宿", "公共交通"],
     "excluded_report_categories": ["行程单"],
     "duplicate_special": False,
+    "inbox_dir": "",
 }
 
 if not os.path.exists(UPLOAD_DIR): os.makedirs(UPLOAD_DIR)
 
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
 db_lock = threading.RLock()
+
+# ── 收件箱监听 ───────────────────────────────────────────────────
+ALLOWED_IMPORT_EXT = {'pdf', 'ofd', 'jpg', 'jpeg', 'png'}
+_inbox_seen = set()  # 已处理的文件路径集合
+
+def _import_single_file(fpath, display_name):
+    """导入单个文件，返回 item dict 或 None"""
+    ext = fpath.rsplit('.', 1)[-1].lower() if '.' in fpath else ''
+    if ext not in ALLOWED_IMPORT_EXT:
+        return None
+    new_name = f"{uuid.uuid4().hex[:8]}.{ext}"
+    dest = os.path.join(UPLOAD_DIR, new_name)
+    shutil.copy2(fpath, dest)
+    cur_md5 = calculate_md5(dest)
+    with db_lock:
+        db = load_db()
+        if any(i.get('md5') == cur_md5 for i in db['invoices']):
+            try: os.remove(dest)
+            except: pass
+            return None
+    # 图片转 PDF
+    if ext in ('jpg', 'jpeg', 'png'):
+        try:
+            img = Image.open(dest)
+            if img.mode == 'RGBA': img = img.convert('RGB')
+            pdf_path = dest.rsplit('.', 1)[0] + '.pdf'
+            a4_w, a4_h = 595, 842
+            scale = min(a4_w / img.size[0], a4_h / img.size[1])
+            new_w, new_h = int(img.size[0] * scale), int(img.size[1] * scale)
+            img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+            a4_img = Image.new('RGB', (a4_w, a4_h), (255, 255, 255))
+            a4_img.paste(img_resized, ((a4_w - new_w) // 2, (a4_h - new_h) // 2))
+            a4_img.save(pdf_path, 'PDF')
+            os.remove(dest)
+            new_name = new_name.rsplit('.', 1)[0] + '.pdf'
+            dest = pdf_path
+            ext = 'pdf'
+        except:
+            return None
+    if ext == 'ofd':
+        pdf_path = ofd_to_pdf(dest)
+        if pdf_path:
+            new_name = new_name.replace('.ofd', '.pdf')
+            try: os.remove(dest)
+            except: pass
+            dest = pdf_path
+        else:
+            try: os.remove(dest)
+            except: pass
+            return None
+    info = smart_ocr(dest)
+    current_settings = load_settings()
+    if info.get("category") not in current_settings.get("categories", []):
+        info["category"] = "其他"
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    item = {"id": str(uuid.uuid4()), "name": new_name, "display_name": display_name,
+            "amount": info['amount'], "category": info['category'],
+            "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+            "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
+            "route": info.get('route', ''), "md5": cur_md5,
+            "document_type": info.get("document_type", ""),
+            "confidence": info.get("confidence", 0),
+            "matched_evidence": info.get("matched_evidence", []),
+            "risk_points": info.get("risk_points", []),
+            "needs_manual_review": info.get("needs_manual_review", False),
+            "seller_name": info.get("seller_name", ""),
+            "invoice_number": info.get("invoice_number", ""),
+            "source_type": ext,
+            "batch_id": "", "status": "pending", "sort_order": 0,
+            "invoice_date": "", "notes": "", "duplicate_status": "none",
+            "created_at": now_str, "updated_at": now_str, "last_exported_at": ""}
+    with db_lock:
+        db = load_db()
+        item["sort_order"] = len(db['invoices'])
+        item["duplicate_status"] = check_duplicate(item, db['invoices'])
+        if not item["needs_manual_review"] and item["confidence"] >= 0.70:
+            if item["amount"] > 0 and item["category"] not in ("其他", ""):
+                if item["date_start"] or item["invoice_date"]:
+                    item["status"] = "confirmed"
+        db['invoices'].append(item)
+        save_db(db)
+    return item
+
+def _inbox_scan():
+    """扫描收件箱目录，导入新文件"""
+    settings = load_settings()
+    inbox = settings.get("inbox_dir", "").strip()
+    if not inbox or not os.path.isdir(inbox):
+        return []
+    imported = []
+    for fname in os.listdir(inbox):
+        fpath = os.path.join(inbox, fname)
+        if not os.path.isfile(fpath): continue
+        if fpath in _inbox_seen: continue
+        ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+        if ext not in ALLOWED_IMPORT_EXT: continue
+        _inbox_seen.add(fpath)
+        item = _import_single_file(fpath, fname)
+        if item:
+            imported.append(item)
+    return imported
+
+def _inbox_watcher():
+    """后台线程：每 30 秒扫描一次收件箱"""
+    while True:
+        try:
+            _inbox_scan()
+        except Exception as e:
+            print(f"收件箱扫描异常: {e}")
+        time.sleep(30)
+
+# 启动监听线程（延迟到 __main__ 中启动，确保所有函数已定义）
+# _watcher_thread = threading.Thread(target=_inbox_watcher, daemon=True)
+# _watcher_thread.start()
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
@@ -216,11 +331,12 @@ def save_settings(data):
     return settings
 
 def check_duplicate(invoice, all_invoices):
-    """检查业务疑似重复：发票号码+销售方+金额+日期 三条件全部满足"""
+    """检查业务疑似重复：多维度交叉匹配"""
     inv_num = (invoice.get("invoice_number") or "").strip()
     seller = (invoice.get("seller_name") or "").strip()
     amount = round(float(invoice.get("amount", 0)), 2)
     inv_date = invoice.get("invoice_date") or invoice.get("date_start") or ""
+    inv_md5 = invoice.get("md5", "")
     inv_id = invoice.get("id", "")
 
     for other in all_invoices:
@@ -228,17 +344,51 @@ def check_duplicate(invoice, all_invoices):
             continue
         if other.get("duplicate_status") == "ignored":
             continue
+
         other_num = (other.get("invoice_number") or "").strip()
         other_seller = (other.get("seller_name") or "").strip()
         other_amount = round(float(other.get("amount", 0)), 2)
         other_date = other.get("invoice_date") or other.get("date_start") or ""
-        # 三条件全部满足才判定疑似重复
-        num_match = inv_num and other_num and inv_num == other_num
-        seller_match = seller and other_seller and seller == other_seller
-        amount_match = amount > 0 and amount == other_amount
-        date_match = inv_date and other_date and inv_date == other_date
-        if num_match and seller_match and amount_match and date_match:
+        other_md5 = other.get("md5", "")
+
+        # 规则1：MD5 完全相同 → 疑似重复（文件内容一模一样）
+        if inv_md5 and other_md5 and inv_md5 == other_md5:
             return "suspected"
+
+        # 规则2：发票号码完全相同且非空 → 疑似重复
+        if inv_num and other_num and inv_num == other_num:
+            return "suspected"
+
+        # 规则3：销售方+金额+日期 三条件全部满足 → 疑似重复
+        num_match = inv_num and other_num and inv_num == other_num
+        seller_exact = seller and other_seller and seller == other_seller
+        # 模糊销售方匹配：一个包含另一个（处理"有限公司" vs "有限责任公司"等变体）
+        seller_fuzzy = (seller and other_seller and len(seller) >= 4 and len(other_seller) >= 4
+                        and (seller in other_seller or other_seller in seller))
+        amount_match = amount > 0 and amount == other_amount
+        # 金额容差匹配：差额在 1% 以内
+        amount_fuzzy = (amount > 0 and other_amount > 0
+                        and abs(amount - other_amount) / max(amount, other_amount) < 0.01)
+        date_match = inv_date and other_date and inv_date == other_date
+        # 日期接近：3天以内
+        date_close = False
+        if inv_date and other_date:
+            try:
+                d1 = datetime.datetime.strptime(inv_date[:10], "%Y-%m-%d")
+                d2 = datetime.datetime.strptime(other_date[:10], "%Y-%m-%d")
+                date_close = abs((d1 - d2).days) <= 3
+            except: pass
+
+        # 精确三条件
+        if (seller_exact or seller_fuzzy) and amount_match and date_match:
+            return "suspected"
+        # 销售方+金额精确+日期接近
+        if seller_exact and amount_match and date_close:
+            return "suspected"
+        # 销售方模糊+金额容差+日期精确
+        if seller_fuzzy and amount_fuzzy and date_match:
+            return "suspected"
+
     return "none"
 
 def write_backup_archive(target):
@@ -249,6 +399,10 @@ def write_backup_archive(target):
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         z.writestr("database.json", json.dumps(db, ensure_ascii=False, indent=2))
         z.writestr("settings.json", json.dumps(settings, ensure_ascii=False, indent=2))
+        # 包含用户分类学习规则
+        rules_path = os.path.join(DATA_DIR, "user_classifications.json")
+        if os.path.exists(rules_path):
+            z.write(rules_path, "user_classifications.json")
         for item in db["invoices"]:
             name = os.path.basename(str(item.get("name", "")))
             path = os.path.join(UPLOAD_DIR, name)
@@ -515,19 +669,51 @@ def _build_layout(ids, duplicate_special=False):
     normal_rects = [fitz.Rect(20, 20, W-20, H/2 - 10), fitz.Rect(20, H/2 + 10, W-20, H-20)]
 
     # ── 配对：发票+行程单按类型配对 ─────────────────────────────
+    # ── 发票 ↔ 行程单 智能配对 ────────────────────────────────────
     PAIR_HINTS = {'打车费': '打车', '公共交通': '地铁'}
+    # 构建发票详情索引
+    inv_details = {}
+    for inv in db['invoices']:
+        inv_details[inv['id']] = {
+            'amount': round(float(inv.get('amount', 0)), 2),
+            'date': inv.get('date_start') or inv.get('invoice_date') or '',
+            'seller': inv.get('seller_name', ''),
+            'route': inv.get('route', ''),
+        }
+
     pair_of = {}
     for inv_id in ids:
         cat = cat_map.get(inv_id, '')
         if cat not in PAIR_HINTS or inv_id in pair_of:
             continue
         hint = PAIR_HINTS[cat]
+        inv_info = inv_details.get(inv_id, {})
+        best_score = -1
+        best_nid = None
         for nid in ids:
             if nid == inv_id or nid in pair_of: continue
-            if cat_map.get(nid) == '行程单' and hint in doc_type_map.get(nid, ''):
-                pair_of[inv_id] = nid
-                pair_of[nid] = inv_id
-                break
+            if cat_map.get(nid) != '行程单' or hint not in doc_type_map.get(nid, ''):
+                continue
+            trip_info = inv_details.get(nid, {})
+            score = 0
+            # 金额完全匹配 +50
+            if inv_info.get('amount') > 0 and inv_info['amount'] == trip_info.get('amount'):
+                score += 50
+            # 日期匹配 +30
+            if inv_info.get('date') and inv_info['date'] == trip_info.get('date'):
+                score += 30
+            # 路线/城市匹配 +20
+            if inv_info.get('route') and trip_info.get('route'):
+                inv_route = inv_info['route']
+                trip_route = trip_info['route']
+                if inv_route[:2] == trip_route[:2]:  # 同城市前缀
+                    score += 20
+            if score > best_score:
+                best_score = score
+                best_nid = nid
+        if best_nid and best_score >= 50:  # 至少金额匹配
+            pair_of[inv_id] = best_nid
+            pair_of[best_nid] = inv_id
 
     # ── 生成页面 ───────────────────────────────────────────────
     pages = []
@@ -750,6 +936,269 @@ def upload():
         traceback.print_exc()
         return jsonify({"error": f"上传处理异常: {str(e)}"}), 500
 
+@app.route('/api/import/zip', methods=['POST'])
+def import_zip():
+    """从 ZIP 文件批量导入发票"""
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return jsonify({"error": "未选择文件"}), 400
+    if not f.filename.lower().endswith('.zip'):
+        return jsonify({"error": "请上传 ZIP 文件"}), 400
+
+    import io
+    try:
+        content = f.read()
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except Exception:
+        return jsonify({"error": "ZIP 文件损坏"}), 400
+
+    # 安全检查
+    for name in zf.namelist():
+        normalized = name.replace("\\", "/")
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            return jsonify({"error": "ZIP 包含不安全路径"}), 400
+
+    ALLOWED_EXT = {'pdf', 'ofd', 'jpg', 'jpeg', 'png'}
+    results = {"success": 0, "skipped": 0, "errors": []}
+
+    for zip_name in zf.namelist():
+        if zip_name.endswith('/'):
+            continue
+        ext = zip_name.rsplit('.', 1)[-1].lower() if '.' in zip_name else ''
+        if ext not in ALLOWED_EXT:
+            continue
+
+        try:
+            file_data = zf.read(zip_name)
+            display_name = os.path.basename(zip_name)
+            fname = f"{uuid.uuid4().hex[:8]}.{ext}"
+            path = os.path.join(UPLOAD_DIR, fname)
+            with open(path, 'wb') as out:
+                out.write(file_data)
+
+            cur_md5 = calculate_md5(path)
+
+            with db_lock:
+                db = load_db()
+                duplicate = any(i.get('md5') == cur_md5 for i in db['invoices'])
+
+            if duplicate:
+                try: os.remove(path)
+                except: pass
+                results["skipped"] += 1
+                continue
+
+            # 图片转 PDF
+            if ext in ('jpg', 'jpeg', 'png'):
+                try:
+                    img = Image.open(path)
+                    if img.mode == 'RGBA': img = img.convert('RGB')
+                    pdf_path = path.rsplit('.', 1)[0] + '.pdf'
+                    a4_w, a4_h = 595, 842
+                    scale = min(a4_w / img.size[0], a4_h / img.size[1])
+                    new_w, new_h = int(img.size[0] * scale), int(img.size[1] * scale)
+                    img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+                    a4_img = Image.new('RGB', (a4_w, a4_h), (255, 255, 255))
+                    a4_img.paste(img_resized, ((a4_w - new_w) // 2, (a4_h - new_h) // 2))
+                    a4_img.save(pdf_path, 'PDF')
+                    os.remove(path)
+                    fname = fname.rsplit('.', 1)[0] + '.pdf'
+                    path = pdf_path
+                    ext = 'pdf'
+                except Exception as e:
+                    results["errors"].append(f"{display_name}: 图片转换失败")
+                    continue
+
+            # OFD 转 PDF
+            if ext == 'ofd':
+                pdf_path = ofd_to_pdf(path)
+                if pdf_path:
+                    fname = fname.replace('.ofd', '.pdf')
+                    display_name = display_name.replace('.ofd', '.pdf')
+                    try: os.remove(path)
+                    except: pass
+                    path = pdf_path
+                    ext = 'pdf'
+                else:
+                    try: os.remove(path)
+                    except: pass
+                    results["errors"].append(f"{display_name}: OFD转换失败")
+                    continue
+
+            info = smart_ocr(path)
+            current_settings = load_settings()
+            if info.get("category") not in current_settings.get("categories", []):
+                info["category"] = "其他"
+
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            item = {"id": str(uuid.uuid4()), "name": fname, "display_name": display_name,
+                    "amount": info['amount'], "category": info['category'],
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                    "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
+                    "route": info.get('route', ''), "md5": cur_md5,
+                    "document_type": info.get("document_type", ""),
+                    "confidence": info.get("confidence", 0),
+                    "matched_evidence": info.get("matched_evidence", []),
+                    "risk_points": info.get("risk_points", []),
+                    "needs_manual_review": info.get("needs_manual_review", False),
+                    "seller_name": info.get("seller_name", ""),
+                    "invoice_number": info.get("invoice_number", ""),
+                    "source_type": ext if ext in ('ofd',) else ("image" if ext in ('jpg','jpeg','png') else "pdf"),
+                    "batch_id": "", "status": "pending", "sort_order": 0,
+                    "invoice_date": "", "notes": "", "duplicate_status": "none",
+                    "created_at": now_str, "updated_at": now_str, "last_exported_at": ""}
+
+            with db_lock:
+                db = load_db()
+                item["sort_order"] = len(db['invoices'])
+                item["duplicate_status"] = check_duplicate(item, db['invoices'])
+                if not item["needs_manual_review"] and item["confidence"] >= 0.70:
+                    if item["amount"] > 0 and item["category"] not in ("其他", ""):
+                        if item["date_start"] or item["invoice_date"]:
+                            item["status"] = "confirmed"
+                db['invoices'].append(item)
+                save_db(db)
+
+            results["success"] += 1
+        except Exception as e:
+            results["errors"].append(f"{zip_name}: {str(e)[:50]}")
+
+    zf.close()
+    return jsonify({"ok": True, **results})
+
+@app.route('/api/import/folder', methods=['POST'])
+def import_folder():
+    """从本地文件夹批量导入发票"""
+    d = request.get_json(silent=True) or {}
+    folder = d.get("path", "").strip()
+    if not folder or not os.path.isdir(folder):
+        return jsonify({"error": "无效的文件夹路径"}), 400
+
+    ALLOWED_EXT = {'pdf', 'ofd', 'jpg', 'jpeg', 'png'}
+    results = {"success": 0, "skipped": 0, "errors": [], "files": []}
+
+    for fname in sorted(os.listdir(folder)):
+        ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+        if ext not in ALLOWED_EXT:
+            continue
+        fpath = os.path.join(folder, fname)
+        if not os.path.isfile(fpath):
+            continue
+        results["files"].append(fname)
+
+    return jsonify({"ok": True, "count": len(results["files"]), "files": results["files"]})
+
+@app.route('/api/import/folder/confirm', methods=['POST'])
+def import_folder_confirm():
+    """确认导入文件夹中的文件"""
+    d = request.get_json(silent=True) or {}
+    folder = d.get("path", "").strip()
+    if not folder or not os.path.isdir(folder):
+        return jsonify({"error": "无效的文件夹路径"}), 400
+
+    ALLOWED_EXT = {'pdf', 'ofd', 'jpg', 'jpeg', 'png'}
+    results = {"success": 0, "skipped": 0, "errors": []}
+
+    for fname in sorted(os.listdir(folder)):
+        ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+        if ext not in ALLOWED_EXT:
+            continue
+        fpath = os.path.join(folder, fname)
+        if not os.path.isfile(fpath):
+            continue
+
+        try:
+            # 复制到 UPLOAD_DIR
+            new_name = f"{uuid.uuid4().hex[:8]}.{ext}"
+            dest = os.path.join(UPLOAD_DIR, new_name)
+            shutil.copy2(fpath, dest)
+
+            cur_md5 = calculate_md5(dest)
+            with db_lock:
+                db = load_db()
+                duplicate = any(i.get('md5') == cur_md5 for i in db['invoices'])
+
+            if duplicate:
+                try: os.remove(dest)
+                except: pass
+                results["skipped"] += 1
+                continue
+
+            # 图片转 PDF
+            if ext in ('jpg', 'jpeg', 'png'):
+                try:
+                    img = Image.open(dest)
+                    if img.mode == 'RGBA': img = img.convert('RGB')
+                    pdf_path = dest.rsplit('.', 1)[0] + '.pdf'
+                    a4_w, a4_h = 595, 842
+                    scale = min(a4_w / img.size[0], a4_h / img.size[1])
+                    new_w, new_h = int(img.size[0] * scale), int(img.size[1] * scale)
+                    img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+                    a4_img = Image.new('RGB', (a4_w, a4_h), (255, 255, 255))
+                    a4_img.paste(img_resized, ((a4_w - new_w) // 2, (a4_h - new_h) // 2))
+                    a4_img.save(pdf_path, 'PDF')
+                    os.remove(dest)
+                    new_name = new_name.rsplit('.', 1)[0] + '.pdf'
+                    dest = pdf_path
+                    ext = 'pdf'
+                except:
+                    results["errors"].append(f"{fname}: 图片转换失败")
+                    continue
+
+            if ext == 'ofd':
+                pdf_path = ofd_to_pdf(dest)
+                if pdf_path:
+                    new_name = new_name.replace('.ofd', '.pdf')
+                    try: os.remove(dest)
+                    except: pass
+                    dest = pdf_path
+                    ext = 'pdf'
+                else:
+                    try: os.remove(dest)
+                    except: pass
+                    results["errors"].append(f"{fname}: OFD转换失败")
+                    continue
+
+            info = smart_ocr(dest)
+            current_settings = load_settings()
+            if info.get("category") not in current_settings.get("categories", []):
+                info["category"] = "其他"
+
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            item = {"id": str(uuid.uuid4()), "name": new_name, "display_name": fname,
+                    "amount": info['amount'], "category": info['category'],
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                    "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
+                    "route": info.get('route', ''), "md5": cur_md5,
+                    "document_type": info.get("document_type", ""),
+                    "confidence": info.get("confidence", 0),
+                    "matched_evidence": info.get("matched_evidence", []),
+                    "risk_points": info.get("risk_points", []),
+                    "needs_manual_review": info.get("needs_manual_review", False),
+                    "seller_name": info.get("seller_name", ""),
+                    "invoice_number": info.get("invoice_number", ""),
+                    "source_type": ext if ext in ('ofd',) else ("image" if ext in ('jpg','jpeg','png') else "pdf"),
+                    "batch_id": "", "status": "pending", "sort_order": 0,
+                    "invoice_date": "", "notes": "", "duplicate_status": "none",
+                    "created_at": now_str, "updated_at": now_str, "last_exported_at": ""}
+
+            with db_lock:
+                db = load_db()
+                item["sort_order"] = len(db['invoices'])
+                item["duplicate_status"] = check_duplicate(item, db['invoices'])
+                if not item["needs_manual_review"] and item["confidence"] >= 0.70:
+                    if item["amount"] > 0 and item["category"] not in ("其他", ""):
+                        if item["date_start"] or item["invoice_date"]:
+                            item["status"] = "confirmed"
+                db['invoices'].append(item)
+                save_db(db)
+
+            results["success"] += 1
+        except Exception as e:
+            results["errors"].append(f"{fname}: {str(e)[:50]}")
+
+    return jsonify({"ok": True, **results})
+
 @app.route('/api/update', methods=['POST'])
 def update():
     d = request.json
@@ -757,21 +1206,30 @@ def update():
         valid_cats = load_settings().get('categories', [])
         if d['category'] not in valid_cats:
             return jsonify({"error": "无效的发票分类"}), 400
+    # 只允许修改这些字段，防止覆盖 id/name/md5/confidence 等内部字段
+    allowed = {"display_name", "amount", "category", "date_start", "date_end", "route",
+               "invoice_number", "seller_name", "invoice_date", "notes", "batch_id", "status"}
+    changes = {k: v for k, v in d.items() if k in allowed}
+    if "amount" in changes:
+        try: changes["amount"] = round(max(0.0, float(changes["amount"])), 2)
+        except: changes["amount"] = 0.0
     db = load_db()
     for i in db['invoices']:
-        if i['id'] == d['id']:
-            # Record user correction if category changed
-            if 'category' in d and d['category'] != i.get('category'):
+        if i['id'] == d.get('id'):
+            if 'category' in changes and changes['category'] != i.get('category'):
                 record_user_correction(
                     DATA_DIR,
                     seller_name=i.get('seller_name', ''),
                     title=i.get('document_type', ''),
                     original_category=i.get('category', ''),
-                    correct_category=d['category'],
+                    correct_category=changes['category'],
                 )
                 i['needs_manual_review'] = False
                 i['confidence'] = 1.0
-            i.update(d)
+            if 'status' in changes and changes['status'] in INVOICE_STATUSES:
+                i['status'] = changes.pop('status')
+            i.update(changes)
+            i['updated_at'] = datetime.datetime.now().isoformat(timespec="seconds")
             break
     save_db(db)
     return jsonify("ok")
@@ -810,7 +1268,8 @@ def clear():
         if os.path.exists(fpath):
             try: os.remove(fpath)
             except: pass
-    save_db({"invoices": []})
+    db['invoices'] = []
+    save_db(db)
     return jsonify("ok")
 
 @app.route('/api/preview', methods=['POST'])
@@ -1372,6 +1831,14 @@ def backup_restore():
         if "settings.json" in names:
             settings_data = json.loads(zf.read("settings.json"))
             save_settings(settings_data)
+        # 恢复用户分类学习规则
+        if "user_classifications.json" in names:
+            rules_path = os.path.join(DATA_DIR, "user_classifications.json")
+            try:
+                with open(rules_path, 'wb') as rf:
+                    rf.write(zf.read("user_classifications.json"))
+            except Exception as e:
+                print(f"恢复用户规则失败: {e}")
 
         return jsonify({"ok": True, "invoice_count": len(db_data.get("invoices", [])),
                         "auto_backup": os.path.basename(auto_backup)})
@@ -1423,7 +1890,97 @@ def rules_clear():
     except: pass
     return jsonify({"ok": True})
 
+# ═══════════════════════════════════════════════════════════════════
+# V6.5 收件箱 API
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route('/api/inbox/scan', methods=['POST'])
+def inbox_scan():
+    """手动触发收件箱扫描"""
+    imported = _inbox_scan()
+    return jsonify({"ok": True, "imported": len(imported)})
+
+@app.route('/api/inbox/configure', methods=['POST'])
+def inbox_configure():
+    """设置收件箱路径"""
+    d = request.get_json(silent=True) or {}
+    path = d.get("path", "").strip()
+    if path and not os.path.isdir(path):
+        return jsonify({"ok": False, "error": "无效的文件夹路径"}), 400
+    settings = load_settings()
+    settings["inbox_dir"] = path
+    save_settings(settings)
+    return jsonify({"ok": True, "inbox_dir": path})
+
+# ═══════════════════════════════════════════════════════════════════
+# V6.5 统计 API
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route('/api/stats', methods=['GET'])
+def stats():
+    """返回发票统计数据"""
+    db = load_db()
+    invoices = db.get("invoices", [])
+    settings = load_settings()
+    excluded = set(settings.get("excluded_report_categories", []))
+
+    total_count = len(invoices)
+    total_amount = sum(float(i.get("amount", 0)) for i in invoices if i.get("category") not in excluded)
+    status_counts = {}
+    cat_summary = {}
+    month_summary = {}
+    seller_summary = {}
+
+    for inv in invoices:
+        # 状态统计
+        st = inv.get("status", "pending")
+        status_counts[st] = status_counts.get(st, 0) + 1
+
+        cat = inv.get("category", "其他")
+        amt = float(inv.get("amount", 0))
+
+        # 分类统计
+        if cat not in cat_summary:
+            cat_summary[cat] = {"count": 0, "total": 0.0}
+        cat_summary[cat]["count"] += 1
+        if cat not in excluded:
+            cat_summary[cat]["total"] += amt
+
+        # 月度统计
+        date = inv.get("date_start") or inv.get("invoice_date") or inv.get("date", "")
+        if date and len(date) >= 7:
+            month = date[:7]  # YYYY-MM
+            if month not in month_summary:
+                month_summary[month] = {"count": 0, "total": 0.0}
+            month_summary[month]["count"] += 1
+            if cat not in excluded:
+                month_summary[month]["total"] += amt
+
+        # 销售方统计
+        seller = inv.get("seller_name", "").strip()
+        if seller:
+            if seller not in seller_summary:
+                seller_summary[seller] = {"count": 0, "total": 0.0}
+            seller_summary[seller]["count"] += 1
+            if cat not in excluded:
+                seller_summary[seller]["total"] += amt
+
+    # 排序
+    top_sellers = sorted(seller_summary.items(), key=lambda x: x[1]["total"], reverse=True)[:20]
+    top_months = sorted(month_summary.items(), key=lambda x: x[0], reverse=True)[:12]
+
+    return jsonify({
+        "total_count": total_count,
+        "total_amount": round(total_amount, 2),
+        "status_counts": status_counts,
+        "categories": cat_summary,
+        "months": dict(top_months),
+        "top_sellers": [{"name": k, **v, "total": round(v["total"], 2)} for k, v in top_sellers],
+    })
+
 if __name__ == '__main__':
+    # 启动收件箱监听
+    threading.Thread(target=_inbox_watcher, daemon=True).start()
     threading.Thread(target=lambda: (time.sleep(1.5), webbrowser.open('http://127.0.0.1:5000'))).start()
     print(">>> 启动成功！请在浏览器访问 http://127.0.0.1:5000 <<<")
     app.run(port=5000, debug=False)

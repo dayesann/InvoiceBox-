@@ -25,5 +25,6 @@
     "excluded_report_categories": [
         "行程单"
     ],
-    "duplicate_special": false
+    "duplicate_special": false,
+    "inbox_dir": ""
 }
