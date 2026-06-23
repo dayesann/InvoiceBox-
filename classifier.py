@@ -118,14 +118,16 @@ AMBIGUOUS_KEYWORDS = {"运输服务费", "运输服务", "服务费", "信息服
 
 def extract_fields(clean_txt, raw_text=""):
     fields = {}
+    # 用 raw_text（保留换行）做跨行字段提取，用 clean_txt 做关键词匹配
+    raw = raw_text or clean_txt
+
+    # 销售方名称（跨行：标签和名称可能在不同行）
     _STOP = r'(?=项目名称|纳税人识别号|金额|税额|发票号码|票据号码|日期|地址|开户|编号|$)'
-    m = re.search(r'销售方\s*名?\s*称?\s*[：:]?\s*([一-鿿][一-鿿\w\(\)（）\-　]+?)' + _STOP, clean_txt)
+    m = re.search(r'销售方\s*名?\s*称?\s*[：:]?\s*\n?\s*([一-鿿][一-鿿\w\(\)（）\-　]+?)' + _STOP, raw, re.MULTILINE)
+    if not m:
+        m = re.search(r'销售方\s*名?\s*称?\s*[：:]?\s*([一-鿿][一-鿿\w\(\)（）\-　]+?)' + _STOP, clean_txt)
     if m: fields["seller_name"] = m.group(1)
-    else:
-        parts = re.split(r'销售方', clean_txt)
-        if len(parts) > 1:
-            q = re.search(r'名\s*称\s*[：:]?\s*([一-鿿][一-鿿\w\(\)（）\-　]+?)' + _STOP, parts[1])
-            if q: fields["seller_name"] = q.group(1)
+
     title_m = re.search(r'(航空运输电子客票行程单|铁路电子客票|电子客票行程单|增值税[电⼦]?[电子]?普通发票|增值税专用发票|数电票|全电发票|网约车行程单|打车行程单|地铁行程单|公交行程单|出租车发票)', clean_txt)
     if title_m: fields["title"] = title_m.group(1)
     items = re.findall(r'项目名称\s*([一-鿿\w\s/]+?)(?:规格|单位|数量|金额|税率|税额|\d+\.\d{2})', clean_txt)
@@ -138,18 +140,95 @@ def extract_fields(clean_txt, raw_text=""):
     tm = re.search(r'(?:车次|列车)\s*[：:]?\s*([GDZTCK]\d{3,5})', clean_txt)
     if not tm: tm = re.search(r'([GDZTCK]\d{3,5})', clean_txt)
     if tm: fields["train_number"] = tm.group(1)
-    dep_m = re.search(r'(?:出发站|出发地|始发地?|起点|上车地点|从)\s*[：:]\s*([一-鿿]{2,10})', clean_txt)
+
+    # 出发地/到达地（跨行匹配）
+    dep_m = re.search(r'(?:出发站|出发地|始发地?|起点|上车地点|出发城市|行程站点)\s*[：:]\s*\n?\s*([一-鿿]{2,15})', raw, re.MULTILINE)
+    if not dep_m:
+        dep_m = re.search(r'(?:出发站|出发地|始发地?|起点|上车地点|从)\s*[：:]\s*([一-鿿]{2,10})', clean_txt)
     if dep_m: fields["departure"] = dep_m.group(1)
-    arr_m = re.search(r'(?:到达站|到达地|目的地?|终点|下车地点|到)\s*[：:]\s*([一-鿿]{2,10})', clean_txt)
+    arr_m = re.search(r'(?:到达站|到达地|目的地?|终点|下车地点|到达城市)\s*[：:]\s*\n?\s*([一-鿿]{2,15})', raw, re.MULTILINE)
+    if not arr_m:
+        arr_m = re.search(r'(?:到达站|到达地|目的地?|终点|下车地点|到)\s*[：:]\s*([一-鿿]{2,10})', clean_txt)
     if arr_m: fields["arrival"] = arr_m.group(1)
+
+    # 行程单路线：匹配 "XX站-XX站" 或 "XX-XX" 格式（跨行）
+    route_m = re.search(r'([一-鿿]{2,6}(?:站|南站|西站|东站|北站))\s*[-—–]\s*([一-鿿]{2,6}(?:站|南站|西站|东站|北站)?)', raw)
+    if route_m and 'departure' not in fields:
+        fields["departure"] = route_m.group(1)
+        fields["arrival"] = route_m.group(2)
+
+    # 表格格式行程单：在表头后查找路线数据
+    if 'departure' not in fields:
+        raw_lines = [l.strip() for l in raw.split('\n') if l.strip()]
+        # 打车行程单：在"起点"表头后面扫描数据行找地名
+        if '起点' in raw_lines:
+            idx = raw_lines.index('起点')
+            # 跳过 "终点" "金额" 等表头
+            j = idx + 1
+            while j < len(raw_lines) and raw_lines[j] in ('终点', '金额'):
+                j += 1
+            # 跳过数字序号行
+            if j < len(raw_lines) and raw_lines[j].isdigit():
+                j += 1
+            # 跳过非地名的列值（服务商、车型、时间、城市等）
+            skip_words = {'曹操出行','享道出行','携华出行','滴滴出行','T3出行','首汽约车','如祺出行',
+                          '优享型','经济型','舒适型','豪华型','快车','专车','北京市','上海市',
+                          '页码','合计'}
+            while j < len(raw_lines) and (
+                raw_lines[j].isdigit() or
+                re.match(r'^\d{4}[\-]', raw_lines[j]) or  # 日期
+                re.match(r'^\d+\.\d+元?$', raw_lines[j]) or  # 金额
+                raw_lines[j] in skip_words or
+                len(raw_lines[j]) == 1
+            ):
+                j += 1
+            # 现在 j 指向起点地名
+            if j < len(raw_lines):
+                dep = raw_lines[j]
+                # 合并跨行（如 "地铁玉泉路" + "站-A1西北口"）
+                if j+1 < len(raw_lines) and not raw_lines[j+1].isdigit() and len(raw_lines[j+1]) < 12 and not re.match(r'^\d', raw_lines[j+1]):
+                    dep += raw_lines[j+1]
+                    j += 1
+                fields["departure"] = dep
+                # 继续扫描找终点
+                j += 1
+                while j < len(raw_lines) and (
+                    raw_lines[j].isdigit() or
+                    re.match(r'^\d{4}[\-]', raw_lines[j]) or
+                    re.match(r'^\d+\.\d+元?$', raw_lines[j]) or
+                    raw_lines[j] in skip_words or
+                    len(raw_lines[j]) == 1
+                ):
+                    j += 1
+                if j < len(raw_lines):
+                    arr = raw_lines[j]
+                    if j+1 < len(raw_lines) and not raw_lines[j+1].isdigit() and len(raw_lines[j+1]) < 12 and not re.match(r'^\d', raw_lines[j+1]):
+                        arr += raw_lines[j+1]
+                    fields["arrival"] = arr
+
+        # 地铁行程单：找到"行程站点"，后面找 "站点1-站点2" 格式
+        if 'departure' not in fields and '行程站点' in raw_lines:
+            idx = raw_lines.index('行程站点')
+            for j in range(idx+1, min(idx+15, len(raw_lines))):
+                m = re.match(r'([一-鿿0-9]{2,10})\s*[-—–]\s*([一-鿿0-9]{2,10})', raw_lines[j])
+                if m:
+                    fields["departure"] = m.group(1)
+                    fields["arrival"] = m.group(2)
+                    break
+
     ci_m = re.search(r'(?:入住|入住日期)\s*[：:]?\s*(\d{4}[\-/]\d{1,2}[\-/]\d{1,2})', clean_txt)
     if ci_m: fields["checkin_date"] = ci_m.group(1)
     co_m = re.search(r'(?:离店|退房|离店日期)\s*[：:]?\s*(\d{4}[\-/]\d{1,2}[\-/]\d{1,2})', clean_txt)
     if co_m: fields["checkout_date"] = co_m.group(1)
     tk_m = re.search(r'(?:运单号|快递单号|物流单号|单号)\s*[：:]\s*([A-Za-z0-9]{6,20})', clean_txt)
     if tk_m: fields["tracking_number"] = tk_m.group(1)
-    inv_m = re.search(r'(?:发票号码|票据号码)\s*[：:]\s*(\d{8,20})', clean_txt)
+
+    # 发票号码（跨行：号码常在下一行）
+    inv_m = re.search(r'(?:发票号码|票据号码)\s*[：:]\s*\n?\s*(\d{8,20})', raw, re.MULTILINE)
+    if not inv_m:
+        inv_m = re.search(r'(?:发票号码|票据号码)\s*[：:]\s*(\d{8,20})', clean_txt)
     if inv_m: fields["invoice_number"] = inv_m.group(1)
+
     return fields
 
 def detect_document_type(fields, clean_txt):

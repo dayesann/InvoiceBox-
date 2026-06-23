@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>InvoiceBox V6.2</title>
+    <title>InvoiceBox V6.3</title>
     <link rel="stylesheet" href="/static/index.min.css" />
     <script src="/static/vue.global.js"></script>
     <script src="/static/index.full.js"></script>
@@ -112,6 +112,23 @@
         .cat-chip { font-size:12px; background:#f0f0f0; padding:4px 10px; border-radius:6px; display:inline-flex; align-items:center; gap:4px; margin:0 4px 4px 0; }
         .cat-chip .del { cursor:pointer; color:#ccc; font-style:normal; font-size:14px; } .cat-chip .del:hover { color:#ff3b30; }
 
+        /* 详情抽屉 */
+        .detail-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.2); z-index:998; }
+        .detail-drawer { position:fixed; top:0; right:0; width:400px; height:100%; background:#fff; box-shadow:-4px 0 20px rgba(0,0,0,0.12); z-index:1001; display:flex; flex-direction:column; }
+        .detail-drawer .detail-header { padding:16px 20px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }
+        .detail-drawer .detail-header h4 { margin:0; font-size:15px; }
+        .detail-drawer .detail-body { flex:1; overflow-y:auto; padding:16px 20px; }
+        .detail-drawer .detail-footer { padding:12px 20px; border-top:1px solid #eee; display:flex; gap:8px; flex-shrink:0; }
+        .df { margin-bottom:14px; }
+        .df label { display:block; font-size:11px; color:#999; margin-bottom:4px; font-weight:600; }
+        .df input, .df select, .df textarea { width:100%; border:1px solid #E5E6EB; border-radius:6px; padding:7px 10px; font-size:13px; outline:none; box-sizing:border-box; }
+        .df input:focus, .df select:focus, .df textarea:focus { border-color:#007AFF; }
+        .df textarea { resize:vertical; min-height:50px; }
+        .df .ro { background:#f8f9fa; color:#999; }
+        .evidence-list { font-size:11px; color:#666; padding-left:16px; margin:4px 0; }
+        .evidence-list li { margin-bottom:2px; }
+        .risk-tag { font-size:10px; color:#e6a23c; background:#fdf6ec; padding:2px 8px; border-radius:4px; margin:2px 4px 2px 0; display:inline-block; }
+
         @media print {
             @page { margin: 0; size: A4; }
             .sidebar, .top-bar, #err-bar, #loading, #print-overlay, .page-num, .modal-overlay { display: none !important; }
@@ -144,29 +161,66 @@
 <div id="app" v-cloak>
     <div class="sidebar">
         <div class="brand-row">
-            <div class="brand"><svg><use xlink:href="#icon-box"></use></svg> InvoiceBox V6.2</div>
+            <div class="brand"><svg><use xlink:href="#icon-box"></use></svg> InvoiceBox V6.3</div>
             <div class="btn-clear" @click="clearAll"><svg width="14" height="14"><use xlink:href="#icon-del"></use></svg> 清空</div>
         </div>
         <div class="upload-area" @click="$refs.file.click()" @dragover.prevent="dragOver=true" @dragleave="dragOver=false" @drop.prevent="handleDrop($event)" :class="{'drag-over': dragOver}">
-            <span v-if="!uploading">+ 拖入或点击上传 PDF / OFD</span><span v-else style="color:var(--accent)">正在分析...</span>
+            <span v-if="!uploading">+ 拖入或点击上传 PDF / OFD / 图片</span><span v-else style="color:var(--accent)">正在分析...</span>
         </div>
-        <input type="file" ref="file" multiple accept=".pdf,.ofd" style="display:none" @change="handleUpload">
+        <input type="file" ref="file" multiple accept=".pdf,.ofd,.jpg,.jpeg,.png" style="display:none" @change="handleUpload">
+        <div style="margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <span style="font-size:11px; color:#999; font-weight:600;">报销批次</span>
+                <span @click="createBatch" style="font-size:11px; color:#007AFF; cursor:pointer;">+ 新建</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:4px;">
+                <span @click="currentBatchId=''" style="font-size:11px; padding:3px 8px; border-radius:6px; cursor:pointer; transition:0.15s;"
+                      :style="currentBatchId==='' ? {background:'#E8F0FE',color:'#007AFF',fontWeight:600} : {background:'#f5f5f5',color:'#666'}">
+                    全部 ({{list.length}})
+                </span>
+                <span v-for="b in batches" :key="b.id" @click="currentBatchId=b.id"
+                      style="font-size:11px; padding:3px 8px; border-radius:6px; cursor:pointer; transition:0.15s;"
+                      :style="currentBatchId===b.id ? {background:'#E8F0FE',color:'#007AFF',fontWeight:600} : {background:'#f5f5f5',color:'#666'}">
+                    {{b.name}} ({{batchCount(b.id)}})
+                </span>
+            </div>
+        </div>
         <div class="search-bar">
-            <input v-model="searchText" placeholder="搜索文件名/路线..." @click.stop>
+            <input v-model="searchText" placeholder="搜索文件名/路线/发票号/销售方..." @click.stop>
             <select v-model="filterCat" @click.stop>
                 <option value="">全部</option>
                 <option v-for="opt in settings.categories" :key="opt" :value="opt">{{opt}}</option>
+            </select>
+        </div>
+        <div style="display:flex; gap:4px; margin-bottom:6px; flex-wrap:wrap;">
+            <span v-for="s in [{v:'',l:'全部'},{v:'pending',l:'待确认'},{v:'confirmed',l:'已确认'},{v:'exported',l:'已导出'},{v:'suspected',l:'疑似重复'}]" :key="s.v"
+                  @click="filterStatus=s.v"
+                  style="font-size:10px; padding:2px 8px; border-radius:12px; cursor:pointer; border:1px solid #E5E6EB; transition:0.15s;"
+                  :style="filterStatus===s.v ? {background:'#007AFF',color:'#fff',borderColor:'#007AFF'} : {background:'#fff',color:'#666'}">
+                {{s.l}}
+            </span>
+        </div>
+        <div class="sort-bar">
+            <span></span>
+            <select v-model="sortBy" @click.stop>
+                <option value="default">自定义排序</option>
+                <option value="amount-desc">金额 ↓</option>
+                <option value="amount-asc">金额 ↑</option>
+                <option value="date-desc">日期 ↓</option>
+                <option value="date-asc">日期 ↑</option>
+                <option value="name">文件名</option>
             </select>
         </div>
         <div class="list" @dragover.prevent>
             <div v-if="filteredList.length===0" style="text-align:center; color:#ccc; font-size:12px; margin-top:40px;">{{ list.length===0 ? '暂无发票' : '无匹配结果' }}</div>
             <div v-for="(item, idx) in filteredList" :key="item.id"
                  class="card" draggable="true"
-                 @click="scrollToPage(item.id)"
+                 @click="scrollToPage(item.id); selectedInvoiceId=item.id; detailOpen=true"
                  @dragstart="dragStart(item.id)" @dragenter="dragEnter(item.id)" @dragend="dragEnd"
                  :class="{dragging: dragIdx===item.id}">
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                     <div style="display:flex; align-items:center; gap:4px;">
+                        <input type="checkbox" :checked="selectedIds.includes(item.id)" @click.stop="toggleSelect(item.id)" style="cursor:pointer;">
                         <select v-model="item.category" class="tag-select" @change="onCategoryChange(item)" @click.stop>
                             <option v-for="opt in settings.categories" :key="opt" :value="opt">{{opt}}</option>
                         </select>
@@ -174,6 +228,8 @@
                         <span v-else-if="item.confidence >= 0.9" style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#67c23a;" title="高置信度"></span>
                         <span v-else-if="item.confidence >= 0.7" style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#e6a23c;" title="中置信度"></span>
                         <span v-else-if="item.confidence > 0" style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#f56c6c;" title="低置信度"></span>
+                        <span v-if="item.status==='exported'" style="font-size:9px; color:#909399; background:#f4f4f5; padding:0 4px; border-radius:3px;">已导出</span>
+                        <span v-if="item.duplicate_status==='suspected'" style="font-size:9px; color:#9b59b6; background:#f5f0ff; padding:0 4px; border-radius:3px;">疑似重复</span>
                     </div>
                     <i style="cursor:pointer; color:#ccc; font-style:normal; font-size:16px; line-height:1;" @click.stop="del(item)" title="删除">×</i>
                 </div>
@@ -182,9 +238,16 @@
                     <div><span style="font-size:12px; color:#999;">¥</span> <input v-model="item.amount" @blur="update(item)" class="money-input" @click.stop></div>
                 </div>
                 <div class="card-meta">
-                    <span class="card-route" v-if="item.route">{{ item.route }}</span>
+                    <span class="card-route" v-if="item.route && ['机票','火车票','公共交通'].includes(item.category)">{{ item.route }}</span>
                 </div>
             </div>
+        </div>
+        <div v-if="selectedIds.length > 0" style="padding:6px 12px; background:#E8F0FE; border-top:1px solid #C6D8F8; display:flex; align-items:center; gap:6px; font-size:11px; flex-shrink:0;">
+            <span style="color:#007AFF; font-weight:600;">已选 {{ selectedIds.length }} 张</span>
+            <button class="btn btn-print" style="height:24px; padding:0 8px; font-size:11px;" @click="batchConfirm">确认</button>
+            <button class="btn btn-print" style="height:24px; padding:0 8px; font-size:11px;" @click="showBatchMove=true">移入批次</button>
+            <button class="btn btn-print" style="height:24px; padding:0 8px; font-size:11px; color:#f56c6c;" @click="batchDelete">删除</button>
+            <span @click="selectedIds=[]" style="margin-left:auto; cursor:pointer; color:#999;">取消</span>
         </div>
         <div class="toast-container" id="toastBox"></div>
         <div class="status-bar">共 {{ list.length }} 项发票{{ filteredList.length !== list.length ? ' (筛选 ' + filteredList.length + ')' : '' }}</div>
@@ -199,6 +262,8 @@
             </div>
             <div class="actions">
                 <button class="btn btn-print" @click="settingsOpen=!settingsOpen"><svg><use xlink:href="#icon-box"></use></svg> 设置</button>
+                <button class="btn btn-dl" @click="doExport">导出报销材料</button>
+                <button class="btn btn-ghost" @click="doExportCSV">导出CSV</button>
                 <button class="btn btn-print" @click="doPrint"><svg><use xlink:href="#icon-print"></use></svg> 打印</button>
                 <button class="btn btn-dl" @click="doDownload"><svg><use xlink:href="#icon-download"></use></svg> 下载</button>
             </div>
@@ -220,7 +285,12 @@
                 <div style="display:flex; justify-content:space-between; font-size:14px; margin-bottom:10px; padding:0 5px;">
                     <span><b>申请日期：</b>{{ today }}</span>
                     <span><b>申请人：</b><input v-model="applicant" style="border:none; border-bottom:1px dashed #ccc; width:80px; font-size:14px; outline:none; background:transparent;"></span>
-                    <span><b>附件张数：</b>{{ list.length }} 张</span>
+                    <span><b>附件张数：</b>{{ filteredList.length }} 张</span>
+                </div>
+                <div v-if="currentBatchId && currentBatch" style="display:flex; gap:20px; font-size:13px; color:#666; margin-bottom:10px; padding:0 5px;">
+                    <span>批次：{{ currentBatch.name }}</span>
+                    <span v-if="currentBatch.department">部门：{{ currentBatch.department }}</span>
+                    <span v-if="currentBatch.project">项目：{{ currentBatch.project }}</span>
                 </div>
                 <table>
                     <thead><tr><th>费用类别</th><th>单据数量</th><th style="text-align:right">金额 (RMB)</th></tr></thead>
@@ -257,6 +327,85 @@
             </div>
         </div>
     </div>
+    <!-- 批量移动弹窗 -->
+    <div class="modal-overlay" v-if="showBatchMove" @click="showBatchMove=false">
+        <div class="modal-box" @click.stop>
+            <h4>移动到批次</h4>
+            <div v-for="b in batches" :key="b.id" style="padding:8px 12px; cursor:pointer; border-radius:6px; font-size:13px;" @click="batchMoveTo(b.id)" @mouseover="$event.target.style.background='#f5f5f5'" @mouseout="$event.target.style.background=''">
+                {{ b.name }}
+            </div>
+            <div style="padding:8px 12px; cursor:pointer; border-radius:6px; font-size:13px; color:#999;" @click="batchMoveTo('')">
+                未分组
+            </div>
+        </div>
+    </div>
+    <!-- 详情抽屉 -->
+    <div class="detail-overlay" v-if="detailOpen && selectedInvoice" @click="detailOpen=false">
+        <div class="detail-drawer" @click.stop>
+            <div class="detail-header">
+                <h4>发票详情</h4>
+                <div style="display:flex; gap:4px;">
+                    <button class="btn btn-print" style="height:26px; padding:0 8px; font-size:11px;" @click="openFile(selectedInvoice)">打开文件</button>
+                    <button class="btn btn-print" style="height:26px; padding:0 6px; font-size:11px;" @click="prevInvoice">&lt;</button>
+                    <button class="btn btn-print" style="height:26px; padding:0 6px; font-size:11px;" @click="nextInvoice">&gt;</button>
+                    <i style="cursor:pointer; color:#999; font-style:normal; font-size:16px; margin-left:4px;" @click="detailOpen=false">✕</i>
+                </div>
+            </div>
+            <div class="detail-body">
+                <div class="df"><label>显示名称</label><input v-model="selectedInvoice.display_name" @blur="saveDetail"></div>
+                <div class="df"><label>费用分类</label>
+                    <select v-model="selectedInvoice.category" @change="saveDetail">
+                        <option v-for="opt in settings.categories" :key="opt" :value="opt">{{opt}}</option>
+                    </select>
+                </div>
+                <div class="df"><label>金额</label><input type="number" step="0.01" v-model.number="selectedInvoice.amount" @blur="saveDetail"></div>
+                <div class="df"><label>发票号码</label><input v-model="selectedInvoice.invoice_number" @blur="saveDetail"></div>
+                <div class="df"><label>销售方</label><input v-model="selectedInvoice.seller_name" @blur="saveDetail"></div>
+                <div class="df"><label>单据类型</label><input :value="selectedInvoice.document_type" class="ro" readonly></div>
+                <div class="df"><label>开票日期</label><input v-model="selectedInvoice.invoice_date" @blur="saveDetail" placeholder="YYYY-MM-DD"></div>
+                <div class="df"><label>费用开始日期</label><input v-model="selectedInvoice.date_start" @blur="saveDetail" placeholder="YYYY-MM-DD"></div>
+                <div class="df"><label>费用结束日期</label><input v-model="selectedInvoice.date_end" @blur="saveDetail" placeholder="YYYY-MM-DD"></div>
+                <div class="df"><label>路线</label><input v-model="selectedInvoice.route" @blur="saveDetail"></div>
+                <div class="df"><label>所属批次</label>
+                    <select v-model="selectedInvoice.batch_id" @change="saveDetail">
+                        <option value="">未分组</option>
+                        <option v-for="b in batches" :key="b.id" :value="b.id">{{b.name}}</option>
+                    </select>
+                </div>
+                <div class="df"><label>状态</label>
+                    <select v-model="selectedInvoice.status" @change="saveDetail">
+                        <option value="pending">待确认</option>
+                        <option value="confirmed">已确认</option>
+                        <option value="exported">已导出</option>
+                        <option value="reimbursed">已报销</option>
+                        <option value="archived">已归档</option>
+                    </select>
+                </div>
+                <div class="df"><label>备注</label><textarea v-model="selectedInvoice.notes" @blur="saveDetail" placeholder="可选备注"></textarea></div>
+                <div class="df">
+                    <label>置信度</label>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <div style="flex:1; height:6px; background:#eee; border-radius:3px; overflow:hidden;">
+                            <div :style="{width:((selectedInvoice.confidence||0)*100)+'%',height:'100%',background:(selectedInvoice.confidence||0)>=0.9?'#67c23a':(selectedInvoice.confidence||0)>=0.7?'#e6a23c':'#f56c6c','border-radius':'3px'}"></div>
+                        </div>
+                        <span style="font-size:12px;">{{((selectedInvoice.confidence||0)*100).toFixed(0)}}%</span>
+                    </div>
+                </div>
+                <div class="df" v-if="selectedInvoice.matched_evidence && selectedInvoice.matched_evidence.length">
+                    <label>分类依据</label>
+                    <ul class="evidence-list"><li v-for="e in selectedInvoice.matched_evidence" :key="e">{{e}}</li></ul>
+                </div>
+                <div class="df" v-if="selectedInvoice.risk_points && selectedInvoice.risk_points.length">
+                    <label>风险提示</label>
+                    <div><span class="risk-tag" v-for="r in selectedInvoice.risk_points" :key="r">{{r}}</span></div>
+                </div>
+            </div>
+            <div class="detail-footer">
+                <button class="btn btn-dl" @click="confirmInvoice">确认无误</button>
+                <button class="btn btn-print" style="margin-left:auto; color:#f56c6c;" @click="deleteInvoice">删除</button>
+            </div>
+        </div>
+    </div>
     <div class="settings-overlay" v-if="settingsOpen" @click="settingsOpen=false">
         <div class="settings-drawer" @click.stop>
             <h3>设置 <i style="cursor:pointer; color:#999; font-style:normal;" @click="settingsOpen=false">✕</i></h3>
@@ -285,6 +434,23 @@
                         {{cat}}
                         <i v-if="cat !== '其他' && !list.some(i => i.category === cat)" class="del" @click="removeCategory(cat)">×</i>
                     </span>
+                </div>
+            </div>
+            <div class="settings-section">
+                <label>分类学习规则 <span v-if="learnRules.length" style="font-weight:normal; color:#999;">({{learnRules.length}}条)</span></label>
+                <div v-if="learnRules.length === 0" style="font-size:12px; color:#ccc;">暂无规则，手动修改分类后自动学习</div>
+                <div v-for="(r, idx) in learnRules" :key="idx" style="font-size:11px; padding:4px 0; border-bottom:1px solid #f0f0f0; display:flex; justify-content:space-between; align-items:center;">
+                    <span>{{ r.seller_name || r.title || '未知' }} → {{ r.correct_category }}</span>
+                    <i style="cursor:pointer; color:#ccc; font-style:normal;" @click="deleteRule(idx)">×</i>
+                </div>
+                <button v-if="learnRules.length" class="btn btn-print" style="height:24px; padding:0 8px; font-size:11px; margin-top:6px; color:#f56c6c;" @click="clearRules">清空全部</button>
+            </div>
+            <div class="settings-section">
+                <label>数据管理</label>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                    <button class="btn btn-print" style="height:28px; padding:0 10px; font-size:12px;" @click="createBackup">创建备份</button>
+                    <button class="btn btn-print" style="height:28px; padding:0 10px; font-size:12px;" @click="$refs.restoreInput.click()">恢复备份</button>
+                    <input type="file" ref="restoreInput" accept=".zip" style="display:none" @change="doRestore">
                 </div>
             </div>
         </div>
@@ -318,7 +484,15 @@
             const dragOver = ref(false);
             const searchText = ref('');
             const filterCat = ref('');
+            const filterStatus = ref('');
             const sortBy = ref('default');
+            const batches = ref([]);
+            const currentBatchId = ref('');
+            const showNewBatch = ref(false);
+            const selectedIds = ref([]);
+            const showBatchMove = ref(false);
+            const selectedInvoiceId = ref('');
+            const detailOpen = ref(false);
             const modalType = ref(null);
             const modalTarget = ref(null);
             const dupSpecial = ref(localStorage.getItem('ib_dupSpecial') === 'true');
@@ -358,7 +532,8 @@
                 await saveReportTitle();
             };
 
-            const load = async () => { try{ const res = await fetch('/api/init'); const data = await res.json(); list.value = data.invoices || []; if(data.settings) settings.value = data.settings; refreshPreview(); }catch(e){} };
+            const load = async () => { try{ const res = await fetch('/api/init'); const data = await res.json(); list.value = data.invoices || []; batches.value = data.batches || []; if(data.settings) settings.value = data.settings; refreshPreview(); loadRules(); }catch(e){} };
+            const batchCount = (bid) => list.value.filter(i => (i.batch_id||'') === bid).length;
 
             const doUpload = async (files) => {
                 uploading.value = true;
@@ -393,7 +568,7 @@
                 if(list.value.length === 0) { pages.value = []; pageMap.value = {}; return; }
                 if(view.value === 'preview') {
                     document.getElementById('loading').style.display = 'block';
-                    const ids = list.value.map(i => i.id);
+                    const ids = filteredList.value.map(i => i.id);
                     const res = await fetch('/api/render_pages?t=' + Date.now(), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids, duplicate_special: dupSpecial.value})});
                     const data = await res.json();
                     pages.value = data.images.map(img => [img]);
@@ -407,12 +582,18 @@
                 if(view.value === 'preview') refreshPreview();
             });
 
+            const selectedInvoice = computed(() => list.value.find(i => i.id === selectedInvoiceId.value) || null);
+            const currentBatch = computed(() => batches.value.find(b => b.id === currentBatchId.value) || null);
+
             const filteredList = computed(() => {
                 let arr = [...list.value];
+                if(currentBatchId.value) arr = arr.filter(i => (i.batch_id||'') === currentBatchId.value);
                 if(filterCat.value) arr = arr.filter(i => i.category === filterCat.value);
+                if(filterStatus.value === 'suspected') arr = arr.filter(i => i.duplicate_status === 'suspected');
+                else if(filterStatus.value) arr = arr.filter(i => i.status === filterStatus.value);
                 if(searchText.value) {
                     const q = searchText.value.toLowerCase();
-                    arr = arr.filter(i => (i.display_name||'').toLowerCase().includes(q) || (i.route||'').toLowerCase().includes(q));
+                    arr = arr.filter(i => [i.display_name, i.route, i.invoice_number, i.seller_name, i.document_type].some(f => (f||'').toLowerCase().includes(q)));
                 }
                 if(sortBy.value === 'amount-desc') arr.sort((a,b) => (parseFloat(b.amount)||0) - (parseFloat(a.amount)||0));
                 else if(sortBy.value === 'amount-asc') arr.sort((a,b) => (parseFloat(a.amount)||0) - (parseFloat(b.amount)||0));
@@ -439,6 +620,143 @@
                 modalType.value = null; modalTarget.value = null;
             };
 
+            const createBatch = async () => {
+                const name = prompt('批次名称：');
+                if(!name || !name.trim()) return;
+                try {
+                    const res = await fetch('/api/batches/create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name: name.trim(), applicant: applicant.value})});
+                    const data = await res.json();
+                    if(data.ok) { batches.value.push(data.batch); showToast('批次已创建', 'ok'); }
+                    else showToast(data.message||'创建失败', 'err');
+                } catch(e) { showToast('创建失败', 'err'); }
+            };
+
+            const toggleSelect = (id) => {
+                const idx = selectedIds.value.indexOf(id);
+                if(idx >= 0) selectedIds.value.splice(idx, 1);
+                else selectedIds.value.push(id);
+            };
+            const batchConfirm = async () => {
+                try {
+                    const res = await fetch('/api/invoices/batch_confirm', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids: selectedIds.value})});
+                    const data = await res.json();
+                    if(data.ok) {
+                        selectedIds.value.forEach(id => { const inv = list.value.find(i=>i.id===id); if(inv) { inv.status='confirmed'; inv.needs_manual_review=false; }});
+                        showToast('已确认 ' + data.confirmed + ' 张', 'ok');
+                        selectedIds.value = [];
+                    }
+                } catch(e) { showToast('操作失败', 'err'); }
+            };
+            const batchMoveTo = async (bid) => {
+                try {
+                    await fetch('/api/invoices/batch_update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids: selectedIds.value, batch_id: bid})});
+                    selectedIds.value.forEach(id => { const inv = list.value.find(i=>i.id===id); if(inv) inv.batch_id = bid; });
+                    showToast('已移动', 'ok');
+                    selectedIds.value = [];
+                    showBatchMove.value = false;
+                } catch(e) { showToast('操作失败', 'err'); }
+            };
+            const batchDelete = async () => {
+                const names = selectedIds.value.map(id => { const inv = list.value.find(i=>i.id===id); return inv ? inv.display_name : id; });
+                const preview = names.slice(0, 5).join('\n') + (names.length > 5 ? '\n...' : '');
+                if(!confirm('确定删除以下 ' + names.length + ' 张发票？\n\n' + preview)) return;
+                try {
+                    await fetch('/api/invoices/batch_delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids: selectedIds.value})});
+                    list.value = list.value.filter(i => !selectedIds.value.includes(i.id));
+                    showToast('已删除 ' + names.length + ' 张', 'ok');
+                    selectedIds.value = [];
+                    refreshPreview();
+                } catch(e) { showToast('删除失败', 'err'); }
+            };
+            const doExport = async () => {
+                if(!currentBatchId.value) { showToast('请先选择批次', 'warn'); return; }
+                try {
+                    const res = await fetch('/api/export/package', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({batch_id: currentBatchId.value, duplicate_special: dupSpecial.value})});
+                    const data = await res.json();
+                    if(data.ok) {
+                        showToast('导出成功', 'ok');
+                        window.open('/download/' + data.file);
+                    } else if(res.status === 409) {
+                        if(confirm('存在异常发票（待确认:' + data.pending + ' 信息缺失:' + data.missing_info + '）。仍然导出？')) {
+                            const r2 = await fetch('/api/export/package', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({batch_id: currentBatchId.value, duplicate_special: dupSpecial.value, force_export: true})});
+                            const d2 = await r2.json();
+                            if(d2.ok) { showToast('导出成功', 'ok'); window.open('/download/' + d2.file); }
+                        }
+                    } else showToast(data.message||'导出失败', 'err');
+                } catch(e) { showToast('导出失败', 'err'); }
+            };
+
+            const learnRules = ref([]);
+            const loadRules = async () => {
+                try { const res = await fetch('/api/rules'); const data = await res.json(); learnRules.value = data.rules || []; } catch(e) {}
+            };
+            const deleteRule = async (idx) => {
+                await fetch('/api/rules/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: idx})});
+                learnRules.value.splice(idx, 1);
+            };
+            const clearRules = async () => {
+                if(!confirm('清空全部分类学习规则？')) return;
+                await fetch('/api/rules/clear', {method:'POST'});
+                learnRules.value = [];
+                showToast('已清空', 'ok');
+            };
+
+            const createBackup = async () => {
+                try {
+                    const res = await fetch('/api/backup/create', {method:'POST'});
+                    const data = await res.json();
+                    if(data.ok) showToast('备份已创建: ' + data.file, 'ok');
+                    else showToast('备份失败', 'err');
+                } catch(e) { showToast('备份失败', 'err'); }
+            };
+            const doRestore = async (e) => {
+                const file = e.target.files[0]; if(!file) return;
+                if(!confirm('恢复将覆盖当前数据，确定继续？')) { e.target.value = ''; return; }
+                const fd = new FormData(); fd.append('file', file);
+                try {
+                    const res = await fetch('/api/backup/restore', {method:'POST', body: fd});
+                    const data = await res.json();
+                    if(data.ok) { showToast('恢复成功', 'ok'); load(); }
+                    else showToast(data.message || '恢复失败', 'err');
+                } catch(err) { showToast('恢复失败', 'err'); }
+                e.target.value = '';
+            };
+
+            const saveDetail = async () => {
+                if(!selectedInvoice.value) return;
+                try {
+                    const res = await fetch('/api/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(selectedInvoice.value)});
+                    if(!res.ok) { const e = await res.json(); showToast(e.error||'保存失败', 'err'); }
+                } catch(e) { showToast('保存失败', 'err'); }
+            };
+            const confirmInvoice = async () => {
+                if(!selectedInvoice.value) return;
+                selectedInvoice.value.status = 'confirmed';
+                selectedInvoice.value.needs_manual_review = false;
+                await saveDetail();
+                showToast('已确认', 'ok');
+            };
+            const deleteInvoice = async () => {
+                if(!selectedInvoice.value) return;
+                if(!confirm('确定删除「' + selectedInvoice.value.display_name + '」？')) return;
+                const id = selectedInvoice.value.id;
+                await fetch('/api/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id})});
+                list.value = list.value.filter(i => i.id !== id);
+                detailOpen.value = false;
+                selectedInvoiceId.value = '';
+                refreshPreview();
+                showToast('已删除', 'ok');
+            };
+            const openFile = (item) => { if(item) window.open('/file/' + item.name); };
+            const prevInvoice = () => {
+                const idx = filteredList.value.findIndex(i => i.id === selectedInvoiceId.value);
+                if(idx > 0) { selectedInvoiceId.value = filteredList.value[idx-1].id; }
+            };
+            const nextInvoice = () => {
+                const idx = filteredList.value.findIndex(i => i.id === selectedInvoiceId.value);
+                if(idx >= 0 && idx < filteredList.value.length - 1) { selectedInvoiceId.value = filteredList.value[idx+1].id; }
+            };
+
             const doPrint = () => {
                 if(list.value.length === 0) return;
                 requestAnimationFrame(() => { setTimeout(() => window.print(), 200); });
@@ -452,6 +770,22 @@
                 const data = await res.json();
                 overlay.style.display = 'none';
                 window.open(data.url);
+            };
+
+            const doExportCSV = () => {
+                const invoices = currentBatchId.value ? list.value.filter(i => (i.batch_id||'') === currentBatchId.value) : list.value;
+                if(!invoices.length) { showToast('无发票可导出', 'warn'); return; }
+                const header = '序号,原始文件名,发票号码,销售方,单据类型,费用分类,金额,开票日期,费用开始日期,费用结束日期,路线,状态,备注';
+                const rows = invoices.map((inv, idx) => {
+                    const v = (s) => '"'+((s||'').replace(/"/g,'""'))+'"';
+                    return [idx+1, v(inv.display_name), v(inv.invoice_number), v(inv.seller_name), v(inv.document_type), v(inv.category), (parseFloat(inv.amount)||0).toFixed(2), v(inv.invoice_date), v(inv.date_start), v(inv.date_end), v(inv.route), v(inv.status), v(inv.notes)].join(',');
+                });
+                const bom = '﻿';
+                const blob = new Blob([bom + header + '\n' + rows.join('\n')], {type:'text/csv;charset=utf-8'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = '发票明细.csv'; a.click();
+                URL.revokeObjectURL(url);
+                showToast('CSV 已下载', 'ok');
             };
 
             const scrollToPage = (itemId) => {
@@ -491,7 +825,13 @@
                 list.value.splice(from, 1);
                 list.value.splice(to, 0, item);
             };
-            const dragEnd = () => { dragIdx.value = -1; refreshPreview(); };
+            const dragEnd = () => {
+                dragIdx.value = -1;
+                // Persist sort_order
+                const ids = list.value.map((item, idx) => ({id: item.id, sort_order: idx}));
+                fetch('/api/invoices/batch_update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids: ids.map(i=>i.id), sort_order_map: ids})}).catch(()=>{});
+                refreshPreview();
+            };
 
             const digitUppercase = (n) => {
                 n = parseFloat(n); if(isNaN(n)) n = 0;
@@ -521,7 +861,7 @@
             };
 
             onMounted(load);
-            return { list, view, uploading, pages, handleUpload, handleDrop, dragOver, searchText, filterCat, sortBy, filteredList, update, del, clearAll, grouped, total, changeView, doPrint, doDownload, dragStart, dragEnter, dragEnd, dragIdx, scrollToPage, today: new Date().toLocaleDateString(), digitUppercase, modalType, modalTarget, confirmAction, pageMap, dupSpecial, settings, onCategoryChange, applicant, newCategory, addCategory, removeCategory, saveReportTitle, settingsOpen };
+            return { list, view, uploading, pages, handleUpload, handleDrop, dragOver, searchText, filterCat, filterStatus, sortBy, filteredList, update, del, clearAll, grouped, total, changeView, doPrint, doDownload, doExportCSV, dragStart, dragEnter, dragEnd, dragIdx, scrollToPage, today: new Date().toLocaleDateString(), digitUppercase, modalType, modalTarget, confirmAction, pageMap, dupSpecial, settings, onCategoryChange, applicant, newCategory, addCategory, removeCategory, saveReportTitle, settingsOpen, batches, currentBatchId, currentBatch, showNewBatch, batchCount, createBatch, selectedIds, showBatchMove, toggleSelect, batchConfirm, batchMoveTo, batchDelete, doExport, createBackup, doRestore, selectedInvoiceId, detailOpen, selectedInvoice, saveDetail, confirmInvoice, deleteInvoice, openFile, prevInvoice, nextInvoice, learnRules, loadRules, deleteRule, clearRules };
         }
     }).mount('#app');
 </script>
