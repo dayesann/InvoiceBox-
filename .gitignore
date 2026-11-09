@@ -17,3 +17,4 @@ server_err.txt
 # Local web build and dependencies
 web/node_modules/
 web/dist/
+.venv/

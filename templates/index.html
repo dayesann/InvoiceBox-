@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>InvoiceBox V6.5</title>
+    <title>InvoiceBox V6.6.0</title>
     <link rel="stylesheet" href="/static/index.min.css" />
     <script src="/static/vue.global.js"></script>
     <script src="/static/index.full.js"></script>
@@ -12,22 +12,22 @@
         :root { --bg: #F5F7FA; --accent: #007AFF; --text: #1D1D1F; --border: #E5E6EB; }
         * { box-sizing: border-box; font-family: "Microsoft YaHei", sans-serif; }
         body { margin: 0; background: var(--bg); height: 100vh; display: flex; justify-content: center; align-items: center; color: var(--text); }
-        
+
         #app { width: 98vw; height: 96vh; background: #fff; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.15); display: flex; overflow: hidden; border: 1px solid rgba(0,0,0,0.05); }
-        
+
         .top-bar { height: 56px; background: #fff; border-bottom: 1px solid #E4E7ED; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; position: relative; z-index: 100; }
 
         .seg-ctrl { background: #f1f1f1; padding: 3px; border-radius: 8px; display: flex; z-index: 1000; cursor: pointer; pointer-events: auto; }
         .seg-item { padding: 5px 24px; font-size: 13px; border-radius: 6px; cursor: pointer; color: #666; transition: 0.2s; font-weight: 500; }
         .seg-item:hover { background: #e6e6e6; }
         .seg-item.active { background: #fff; color: #000; box-shadow: 0 2px 5px rgba(0,0,0,0.1); font-weight: bold; cursor: default; }
-        
+
         .actions { display: flex; gap: 10px; z-index: 100; }
-        
+
         /* 🔥 修复1：找回了丢失的 svg 尺寸限制，按钮图标恢复正常大小 */
         .btn { border: none; padding: 0 16px; height: 36px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: 0.2s; display: flex; align-items: center; gap: 5px; }
-        .btn svg { width: 16px; height: 16px; } 
-        
+        .btn svg { width: 16px; height: 16px; }
+
         .btn-print { background: #F2F2F7; color: #333; } .btn-print:hover { background: #E5E5EA; }
         .btn-ghost { background: transparent; color: #007AFF; border: 1px solid #E5E6EB; } .btn-ghost:hover { background: #ECF5FF; }
         .btn-dl { background: var(--accent); color: #fff; box-shadow: 0 2px 8px rgba(0,122,255,0.3); } .btn-dl:hover { transform: translateY(-1px); background: #0062CC; }
@@ -46,7 +46,7 @@
         .search-bar select { border: 1px solid #E5E6EB; border-radius: 6px; padding: 6px 6px; font-size: 12px; outline: none; background: #fff; cursor: pointer; }
         .sort-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 11px; color: #999; }
         .sort-bar select { border: none; background: #f5f5f5; border-radius: 4px; padding: 3px 6px; font-size: 11px; outline: none; cursor: pointer; }
-        
+
         .list { flex: 1; overflow-y: auto; padding-right: 4px; margin-bottom: 32px; }
         .card { background: #fff; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); border: 1px solid #EBEEF5; transition: 0.2s; cursor: grab; }
         .card:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.08); border-color: #C6E2FF; }
@@ -55,19 +55,19 @@
         .card-route { color: #67C23A; font-weight: 500; }
         .name-input { border: none; background: transparent; font-size: 12px; width: 60%; overflow: hidden; text-overflow: ellipsis; outline: none; color: var(--text); }
         .name-input:focus { border-bottom: 1px dashed var(--accent); }
-        
+
         .tag-select { border: none; background: #eee; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold; color: #555; cursor: pointer; outline: none; }
         .money-input { width: 60px; border: none; border-bottom: 1px dashed #ddd; text-align: right; font-weight: bold; font-size: 15px; color: var(--accent); outline: none; }
-        
+
         .status-bar { position: absolute; bottom: 0; left: 0; width: 100%; height: 32px; background: #f8f9fa; border-top: 1px solid #eee; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #999; font-weight: 500; }
 
         .main { flex: 1; display: flex; flex-direction: column; background: #F0F2F5; position: relative; }
         .workspace { flex: 1; overflow: auto; padding: 60px 40px; display: flex; flex-direction: column; align-items: center; gap: 30px; }
-        
+
         .paper { width: 210mm; background: #fff; padding: 20mm; box-shadow: 0 10px 30px rgba(0,0,0,0.08); flex-shrink: 0; }
         .a4-page { width: 210mm; height: 297mm; display: flex; flex-direction: column; position: relative; margin-bottom: 30px; padding: 0; overflow: hidden; }
         .report-paper { min-height: 297mm; height: auto; }
-        
+
         .half-page { height: 148.5mm; width: 100%; border-bottom: 1px dashed #ddd; display: flex; align-items: center; justify-content: center; padding: 10px; position: relative; overflow: hidden; }
         .half-page:last-child { border-bottom: none; }
         .half-page img { max-width: 95%; max-height: 90%; object-fit: contain; }
@@ -162,7 +162,7 @@
 <div id="app" v-cloak>
     <div class="sidebar">
         <div class="brand-row">
-            <div class="brand"><svg><use xlink:href="#icon-box"></use></svg> InvoiceBox V6.5</div>
+            <div class="brand"><svg><use xlink:href="#icon-box"></use></svg> InvoiceBox V6.6.0</div>
             <div class="btn-clear" @click="clearAll"><svg width="14" height="14"><use xlink:href="#icon-del"></use></svg> 清空</div>
         </div>
         <div style="display:flex; gap:0; margin-bottom:10px; background:#f1f1f1; border-radius:8px; padding:3px;">
@@ -244,7 +244,7 @@
             <div v-for="(item, idx) in filteredList" :key="item.id"
                  class="card" draggable="true"
                  @click="scrollToPage(item.id); selectedInvoiceId=item.id; detailOpen=true"
-                 @dragstart="dragStart(item.id)" @dragenter="dragEnter(item.id)" @dragend="dragEnd"
+                 @dragstart="dragStart(item.id)" @dragenter.prevent="dragEnter(item.id)" @dragover.prevent @drop.stop.prevent="dropOnCard(item.id)" @dragend="dragEnd"
                  :class="{dragging: dragIdx===item.id}">
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                     <div style="display:flex; align-items:center; gap:4px;">
@@ -266,6 +266,17 @@
                     <div><span style="font-size:12px; color:#999;">¥</span> <input v-model="item.amount" @blur="update(item)" class="money-input" @click.stop></div>
                 </div>
                 <div class="card-meta">
+                    <span v-if="item.category==='行程单'" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px" :title="item.association_reason">{{ item.parent_id ? '已关联 · ' + ((list.find(r=>r.id===item.parent_id)||{}).display_name||'') : '待关联' }} · 不计金额</span>
+                    <button v-if="item.category==='行程单'" @click.stop="associationOpen=associationOpen===item.id?'':item.id" style="border:0;background:none;color:#007aff;cursor:pointer">关联</button>
+                    <div v-if="associationOpen===item.id" @click.stop>
+                        <select :value="item.parent_id||''" @change="setAssociation(item,$event.target.value)">
+                            <option value="">不关联</option>
+                            <option v-for="expense in list.filter(r=>r.category!=='行程单' && (r.batch_id||'')===(item.batch_id||''))" :value="expense.id">{{expense.display_name}} · ¥{{expense.amount}}</option>
+                        </select>
+                        <button @click="setAssociation(item,'',true)">重新匹配</button>
+                        <small>{{item.association_warning}}</small>
+                    </div>
+
                     <span class="card-route" v-if="item.route && ['机票','火车票','公共交通'].includes(item.category)">{{ item.route }}</span>
                 </div>
             </div>
@@ -358,7 +369,7 @@
                 </div>
                 <div v-if="list.length===0" style="color:#999; margin-top:100px;">请在左侧添加发票</div>
             </template>
-            
+
             <div v-if="view==='report'" class="paper report-paper">
                 <h2 style="text-align:center; margin-bottom:40px;">
                     <input v-model="settings.report_title" @blur="saveReportTitle" style="text-align:center; border:none; border-bottom:1px dashed #ccc; font-size:20px; font-weight:bold; width:200px; outline:none; background:transparent;">
@@ -598,7 +609,7 @@
         const box = document.getElementById('toastBox');
         const t = document.createElement('div');
         t.className = 'toast toast-' + type;
-        t.innerHTML = msg;
+        t.textContent = msg;
         box.appendChild(t);
         setTimeout(() => t.remove(), 3000);
     }
@@ -612,6 +623,7 @@
             const uploading = ref(false);
             const pages = ref([]);
             const dragIdx = ref(-1);
+            const associationOpen = ref('');
             const dragOver = ref(false);
             const searchText = ref('');
             const filterCat = ref('');
@@ -664,7 +676,8 @@
                 await saveReportTitle();
             };
 
-            const load = async () => { try{ const res = await fetch('/api/init'); const data = await res.json(); list.value = data.invoices || []; batches.value = data.batches || []; if(data.settings) settings.value = data.settings; refreshPreview(); loadRules(); }catch(e){} };
+            const load = async () => { try{ const res = await fetch('/api/init'); const data = await res.json(); const rows = data.invoices || []; const paired = new Set();
+                list.value = []; for(const row of rows) { if(row.parent_id && rows.some(r=>r.id===row.parent_id)) continue; list.value.push(row); paired.add(row.id); for(const child of rows.filter(r=>r.parent_id===row.id)) {list.value.push(child); paired.add(child.id);} } for(const row of rows) if(!paired.has(row.id)) list.value.push(row); batches.value = data.batches || []; if(data.settings) settings.value = data.settings; refreshPreview(); loadRules(); }catch(e){} };
             const batchCount = (bid) => list.value.filter(i => (i.batch_id||'') === bid).length;
 
             const doUpload = async (files) => {
@@ -685,7 +698,7 @@
                 }
                 if(okCount > 0) showToast('已添加 ' + okCount + ' 张发票', 'ok');
                 uploading.value = false;
-                refreshPreview();
+                await load();
             };
 
             const handleUpload = (e) => { doUpload(e.target.files); e.target.value = ''; };
@@ -782,7 +795,7 @@
             });
 
             const changeView = (v) => { view.value = v; if(v === 'preview') refreshPreview(); };
-            const update = async (item) => { await fetch('/api/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(item)}); };
+            const update = async (item) => { const res = await fetch('/api/update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(item)}); if(!res.ok) { showToast('保存失败','err'); return; } await load(); };
             const del = (item) => { modalType.value = 'delete'; modalTarget.value = item; };
             const clearAll = () => { if(list.value.length === 0) return; modalType.value = 'clear'; modalTarget.value = null; };
             const confirmAction = async () => {
@@ -962,20 +975,23 @@
                 if(idx >= 0 && idx < filteredList.value.length - 1) { selectedInvoiceId.value = filteredList.value[idx+1].id; }
             };
 
-            const doPrint = () => {
-                if(list.value.length === 0) return;
-                requestAnimationFrame(() => { setTimeout(() => window.print(), 200); });
-            };
             const doDownload = async () => {
+                if(!filteredList.value.length) return;
+                const warnings = filteredList.value.filter(i=>i.category==='行程单' && (!i.parent_id || i.association_warning));
+                if(warnings.length && !confirm('有 '+warnings.length+' 份行程单未关联或金额不一致，仍然生成？')) return;
                 const overlay = document.getElementById('print-overlay');
-                overlay.querySelector('span').innerText = '正在生成 PDF...';
+                overlay.querySelector('span').innerText = '正在生成高清 PDF...';
                 overlay.style.display = 'flex';
-                const ids = list.value.map(i => i.id);
-                const res = await fetch('/api/download_pdf', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids, duplicate_special: dupSpecial.value})});
-                const data = await res.json();
-                overlay.style.display = 'none';
-                window.open(data.url);
+                try {
+                    const ids = filteredList.value.map(i=>i.id);
+                    const res = await fetch('/api/download_pdf', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,duplicate_special:dupSpecial.value})});
+                    if(!res.ok) throw new Error('生成失败，请检查票据文件');
+                    const data = await res.json();
+                    window.open(data.url+'?t='+Date.now(),'_blank');
+                } catch(e) { showToast(e.message,'err'); }
+                finally { overlay.style.display = 'none'; }
             };
+            const doPrint = () => { if(view.value==='report') window.print(); else doDownload(); };
 
             const doExportCSV = () => {
                 const invoices = currentBatchId.value ? list.value.filter(i => (i.batch_id||'') === currentBatchId.value) : list.value;
@@ -1020,23 +1036,30 @@
                 return s + amt;
             }, 0));
 
-            const dragStart = (id) => dragIdx.value = id;
-            const dragEnter = (id) => {
-                if (dragIdx.value === id) return;
-                const from = list.value.findIndex(item => item.id === dragIdx.value);
-                const to = list.value.findIndex(item => item.id === id);
-                if (from < 0 || to < 0) return;
-                const item = list.value[from];
-                list.value.splice(from, 1);
-                list.value.splice(to, 0, item);
+            const setAssociation = async (item, parent_id, retry=false) => {
+                const res = await fetch('/api/associate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:item.id,parent_id,retry})});
+                if(!res.ok) { showToast((await res.json()).error, 'err'); return; }
+                associationOpen.value = '';
+                await load();
             };
-            const dragEnd = () => {
-                dragIdx.value = -1;
-                // Persist sort_order
-                const ids = list.value.map((item, idx) => ({id: item.id, sort_order: idx}));
-                fetch('/api/invoices/batch_update', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids: ids.map(i=>i.id), sort_order_map: ids})}).catch(()=>{});
-                refreshPreview();
+            const dragStart = id => dragIdx.value = id;
+            const dragEnter = () => {};
+            const dropOnCard = async id => {
+                const source = list.value.find(r=>r.id===dragIdx.value);
+                const target = list.value.find(r=>r.id===id);
+                if(!source || !target || source===target) return;
+                const attachment = source.category==='行程单' ? source : target.category==='行程单' ? target : null;
+                const expense = attachment===source ? target : source;
+                if(attachment && expense.category!=='行程单') {
+                    await setAssociation(attachment, expense.id);
+                } else {
+                    const rows = list.value.filter(r=>r!==source);
+                    rows.splice(rows.findIndex(r=>r===target),0,source);
+                    const res = await fetch('/api/reorder', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:rows.map(r=>r.id)})});
+                    if(res.ok) await load();
+                }
             };
+            const dragEnd = () => { dragIdx.value = -1; };
 
             const digitUppercase = (n) => {
                 n = parseFloat(n); if(isNaN(n)) n = 0;
@@ -1067,7 +1090,7 @@
             };
 
             onMounted(load);
-            return { list, view, uploading, pages, handleUpload, handleDrop, dragOver, searchText, filterCat, filterStatus, sortBy, filteredList, update, del, clearAll, grouped, total, changeView, doPrint, doDownload, doExportCSV, dragStart, dragEnter, dragEnd, dragIdx, scrollToPage, today: new Date().toLocaleDateString(), digitUppercase, modalType, modalTarget, confirmAction, pageMap, dupSpecial, settings, onCategoryChange, applicant, newCategory, addCategory, removeCategory, saveReportTitle, settingsOpen, batches, currentBatchId, currentBatch, showNewBatch, batchCount, createBatch, selectedIds, showBatchMove, toggleSelect, batchConfirm, batchMoveTo, batchDelete, doExport, createBackup, doRestore, selectedInvoiceId, detailOpen, selectedInvoice, saveDetail, confirmInvoice, deleteInvoice, openFile, prevInvoice, nextInvoice, learnRules, loadRules, deleteRule, clearRules, importZip, importFolder, inboxDir, saveInboxDir, statsData, statsOpen, loadStats, filterDateFrom, filterDateTo, filterAmountMin, filterAmountMax, showArchived, sidebarTab };
+            return { associationOpen, setAssociation, dropOnCard, list, view, uploading, pages, handleUpload, handleDrop, dragOver, searchText, filterCat, filterStatus, sortBy, filteredList, update, del, clearAll, grouped, total, changeView, doPrint, doDownload, doExportCSV, dragStart, dragEnter, dragEnd, dragIdx, scrollToPage, today: new Date().toLocaleDateString(), digitUppercase, modalType, modalTarget, confirmAction, pageMap, dupSpecial, settings, onCategoryChange, applicant, newCategory, addCategory, removeCategory, saveReportTitle, settingsOpen, batches, currentBatchId, currentBatch, showNewBatch, batchCount, createBatch, selectedIds, showBatchMove, toggleSelect, batchConfirm, batchMoveTo, batchDelete, doExport, createBackup, doRestore, selectedInvoiceId, detailOpen, selectedInvoice, saveDetail, confirmInvoice, deleteInvoice, openFile, prevInvoice, nextInvoice, learnRules, loadRules, deleteRule, clearRules, importZip, importFolder, inboxDir, saveInboxDir, statsData, statsOpen, loadStats, filterDateFrom, filterDateTo, filterAmountMin, filterAmountMax, showArchived, sidebarTab };
         }
     }).mount('#app');
 </script>

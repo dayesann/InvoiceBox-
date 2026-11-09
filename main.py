@@ -3,6 +3,8 @@ import mimetypes
 import io
 import shutil
 import tempfile
+import unicodedata
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import fitz  # PyMuPDF
 from PIL import Image
 from easyofd import OFD
@@ -24,6 +26,9 @@ else:
     INTERNAL_DIR = BASE_DIR
     DATA_DIR = BASE_DIR
 
+# Optional isolated data location for development and packaged smoke tests.
+DATA_DIR = os.path.abspath(os.environ.get('INVOICEBOX_DATA_DIR', DATA_DIR))
+
 TEMPLATE_DIR = os.path.join(INTERNAL_DIR, 'templates')
 STATIC_DIR = os.path.join(INTERNAL_DIR, 'static')
 UPLOAD_DIR = os.path.join(DATA_DIR, 'invoices')
@@ -31,7 +36,7 @@ DB_FILE = os.path.join(DATA_DIR, 'database.json')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 BACKUP_DIR = os.path.join(DATA_DIR, 'backups')
 MERGED_PDF = os.path.join(UPLOAD_DIR, 'merged_preview.pdf')
-APP_VERSION = "6.5"
+APP_VERSION = "6.6.0"
 SCHEMA_VERSION = 2
 
 NEW_INVOICE_DEFAULTS = {
@@ -67,6 +72,17 @@ if not os.path.exists(UPLOAD_DIR): os.makedirs(UPLOAD_DIR)
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
 db_lock = threading.RLock()
 
+@app.before_request
+def protect_local_service():
+    from urllib.parse import urlsplit
+    if request.host.split(':')[0] not in ('127.0.0.1', 'localhost'):
+        return jsonify(error='只允许本机访问'), 403
+    origin = request.headers.get('Origin')
+    if origin and urlsplit(origin).netloc != request.host:
+        return jsonify(error='不允许跨站请求'), 403
+    if request.headers.get('Sec-Fetch-Site') == 'cross-site':
+        return jsonify(error='不允许跨站请求'), 403
+
 # ── 收件箱监听 ───────────────────────────────────────────────────
 ALLOWED_IMPORT_EXT = {'pdf', 'ofd', 'jpg', 'jpeg', 'png'}
 _inbox_seen = set()  # 已处理的文件路径集合
@@ -89,16 +105,11 @@ def _import_single_file(fpath, display_name):
     # 图片转 PDF
     if ext in ('jpg', 'jpeg', 'png'):
         try:
-            img = Image.open(dest)
-            if img.mode == 'RGBA': img = img.convert('RGB')
             pdf_path = dest.rsplit('.', 1)[0] + '.pdf'
-            a4_w, a4_h = 595, 842
-            scale = min(a4_w / img.size[0], a4_h / img.size[1])
-            new_w, new_h = int(img.size[0] * scale), int(img.size[1] * scale)
-            img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-            a4_img = Image.new('RGB', (a4_w, a4_h), (255, 255, 255))
-            a4_img.paste(img_resized, ((a4_w - new_w) // 2, (a4_h - new_h) // 2))
-            a4_img.save(pdf_path, 'PDF')
+            with fitz.open(dest) as image_document:
+                pdf_bytes = image_document.convert_to_pdf()
+            with fitz.open(stream=pdf_bytes, filetype='pdf') as image_pdf:
+                image_pdf.save(pdf_path)
             os.remove(dest)
             new_name = new_name.rsplit('.', 1)[0] + '.pdf'
             dest = pdf_path
@@ -126,7 +137,8 @@ def _import_single_file(fpath, display_name):
             "date": datetime.datetime.now().strftime("%Y-%m-%d"),
             "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
             "route": info.get('route', ''), "md5": cur_md5,
-            "document_type": info.get("document_type", ""),
+            "recognized_text": info.get("recognized_text", ""),
+                "document_type": info.get("document_type", ""),
             "confidence": info.get("confidence", 0),
             "matched_evidence": info.get("matched_evidence", []),
             "risk_points": info.get("risk_points", []),
@@ -275,7 +287,141 @@ def load_db():
             return {"schema_version": SCHEMA_VERSION, "invoices": [], "batches": []}
 
 def save_db(data):
-    with db_lock: _save_json_atomic(DB_FILE, data)
+    with db_lock:
+        for inv in data['invoices']:
+            inv.setdefault('original_name', inv.get('display_name', ''))
+        data['invoices'] = resolve_associations(data['invoices'])
+        _save_json_atomic(DB_FILE, data)
+
+def _match_cents(inv):
+    try:
+        value = Decimal(str(inv.get('amount', 0)))
+        return int((value * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP)) if value.is_finite() and value > 0 else None
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+def _match_name(inv):
+    return unicodedata.normalize('NFKC', inv.get('original_name') or inv.get('display_name', '')).lower()
+
+def _match_kind(inv):
+    text = ' '.join([inv.get('recognized_text', ''), inv.get('document_type', ''), _match_name(inv)])
+    taxi = bool(re.search(r'网约车|网络预约出租|出租汽车|出租车|打车|滴滴出行|曹操出行', text))
+    transit = bool(re.search(r'地铁|轨道交通|城市轨道|公交|公共汽车|轻轨', text))
+    text_kind = ('taxi' if taxi else 'transit') if taxi != transit else ''
+    category_kind = {'打车费': 'taxi', '公共交通': 'transit'}.get(inv.get('category'), '')
+    return 'conflict' if category_kind and text_kind and category_kind != text_kind else category_kind or text_kind
+
+def _match_batch(inv):
+    name = os.path.splitext(_match_name(inv))[0]
+    bracket = re.match(r'^(?:【([^】]+)】|\[([^\]]+)\])', name)
+    key = next((x for x in bracket.groups() if x), '') if bracket else ''
+    if re.fullmatch(r'.+[-_－—]\d+(?:\.\d+)?元[-_－—]\d+个行程', key):
+        return key
+    suffix = re.match(r'^(.+?)[\s_－—-]+(?:发票|附单\s*\d*|行程单)$', name)
+    return suffix[1].strip() if suffix else ''
+
+def _match_index(inv):
+    stem = os.path.splitext(_match_name(inv))[0].strip()
+    prefix = re.fullmatch(r'(\d+)[\s_-]+(?:invoice|trip)', stem)
+    suffix = re.fullmatch(r'(?:invoice|trip)\s*\((\d+)\)', stem)
+    if prefix: return 'prefix:' + str(int(prefix[1]))
+    if suffix: return 'suffix:' + str(int(suffix[1]))
+    return 'base:0' if stem in ('invoice', 'trip') else ''
+
+def _association_edge(attachment, expense):
+    if attachment.get('batch_id', '') != expense.get('batch_id', ''):
+        return None
+    if expense.get('category') not in ('交通', '公共交通', '打车费'):
+        return None
+    ak, ek = _match_kind(attachment), _match_kind(expense)
+    if 'conflict' in (ak, ek) or (ak and ek and ak != ek): return None
+    ac, ec = _match_cents(attachment), _match_cents(expense)
+    if ac is not None and ec is not None and ac != ec: return None
+    same_amount = ac is not None and ac == ec
+    batch = _match_batch(attachment)
+    same_batch = bool(batch and batch == _match_batch(expense))
+    if not same_amount and not same_batch: return None
+    index = _match_index(attachment)
+    route = re.sub(r'\s', '', attachment.get('route', ''))
+    signals = [
+        (same_amount, 20, '金额一致'),
+        (bool(ak and ak == ek), 10, '交通类型一致'),
+        (same_batch, 100, '原文件批次名称一致'),
+        (bool(index and index == _match_index(expense)), 40, '原文件序号一致'),
+        (bool(attachment.get('date_start') and attachment['date_start'] == expense.get('date_start')), 1, '日期一致'),
+        (bool(route and route == re.sub(r'\s', '', expense.get('route', ''))), 2, '路线一致'),
+    ]
+    return (sum(weight for flag, weight, _ in signals if flag), '、'.join(label for flag, _, label in signals if flag))
+
+def resolve_associations(records):
+    """Persist manual decisions; accept only mutual unique best automatic candidates."""
+    result = [dict(row) for row in records]
+    expenses = {row['id']: row for row in result if row.get('category') != '行程单'}
+    occupied, available, previous = set(), [], {}
+    for row in result:
+        if row.get('category') != '行程单':
+            row.pop('parent_id', None)
+            row.pop('association_origin', None)
+            row.pop('association_state', None)
+            continue
+        parent = expenses.get(row.get('parent_id'))
+        if parent and parent.get('batch_id', '') != row.get('batch_id', ''): parent = None
+        row['association_warning'] = ''
+        if row.get('association_origin') == 'manual' and parent:
+            occupied.add(parent['id'])
+            row['association_state'] = 'confirmed'
+            row['association_reason'] = '已手动关联'
+            ac, ec = _match_cents(row), _match_cents(parent)
+            if ac is not None and ec is not None and ac != ec: row['association_warning'] = '金额不一致，请核对'
+        elif row.get('association_origin') == 'rejected':
+            row.update(parent_id='', association_state='unmatched', association_reason='已选择不关联')
+        else:
+            if parent and row.get('association_origin') == 'auto': previous[row['id']] = parent['id']
+            row.update(parent_id='', association_origin='auto', association_state='unmatched', association_reason='待关联')
+            available.append(row)
+    edges = []
+    for row in available:
+        for expense in expenses.values():
+            if expense['id'] in occupied and previous.get(row['id']) != expense['id']: continue
+            score = _association_edge(row, expense)
+            if score: edges.append((row['id'], expense['id'], *score))
+    def best(options):
+        ordered = sorted(options, key=lambda edge: edge[2], reverse=True)
+        return ordered[0] if ordered and (len(ordered) == 1 or ordered[0][2] > ordered[1][2]) else None
+    for row in available:
+        candidate = best([edge for edge in edges if edge[0] == row['id']])
+        if candidate and best([edge for edge in edges if edge[1] == candidate[1]]) == candidate:
+            row.update(parent_id=candidate[1], association_state='suggested', association_reason=candidate[3])
+    return result
+
+@app.route('/api/associate', methods=['POST'])
+def associate():
+    payload = request.get_json(silent=True) or {}
+    with db_lock:
+        data = load_db()
+        by_id = {row['id']: row for row in data['invoices']}
+        row = by_id.get(payload.get('id'))
+        if not row or row.get('category') != '行程单': return jsonify(error='请选择行程单'), 400
+        parent_id = payload.get('parent_id', '')
+        parent = by_id.get(parent_id)
+        if parent_id and (not parent or parent.get('category') == '行程单' or parent.get('batch_id', '') != row.get('batch_id', '')):
+            return jsonify(error='请选择同一批次的发票'), 400
+        row.update(parent_id=parent_id, association_origin='auto' if payload.get('retry') else 'manual' if parent else 'rejected')
+        save_db(data)
+    return jsonify(ok=True)
+
+@app.route('/api/reorder', methods=['POST'])
+def reorder():
+    ids = (request.get_json(silent=True) or {}).get('ids', [])
+    if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids) or len(ids) != len(set(ids)):
+        return jsonify(error='无效排序'), 400
+    with db_lock:
+        data = load_db()
+        ranks = {value: index for index, value in enumerate(ids)}
+        for row in data['invoices']: row['sort_order'] = ranks.get(row['id'], len(ids) + row.get('sort_order', 0))
+        data['invoices'].sort(key=lambda row: row['sort_order'])
+        save_db(data)
+    return jsonify(ok=True)
 
 def _save_json_atomic(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -455,19 +601,13 @@ def ofd_to_pdf(ofd_path):
             ofd_data = f.read()
         ofd = OFD()
         ofd.read(ofd_data, fmt="binary")
-        img_list = ofd.to_jpg()
-        if not img_list:
+        # Convert once during import. Keep text/vector objects instead of JPEG pages.
+        pdf_bytes = ofd.to_pdf()
+        if not pdf_bytes:
             return None
-        doc = fitz.open()
-        for pil_img in img_list:
-            img_w, img_h = pil_img.size
-            page = doc.new_page(width=img_w, height=img_h)
-            img_stream = io.BytesIO()
-            pil_img.save(img_stream, format="JPEG", quality=85)
-            page.insert_image(fitz.Rect(0, 0, img_w, img_h), stream=img_stream.getvalue())
         pdf_path = ofd_path.rsplit('.', 1)[0] + '.pdf'
-        doc.save(pdf_path)
-        doc.close()
+        with fitz.open(stream=pdf_bytes, filetype='pdf') as document:
+            document.save(pdf_path, garbage=3, deflate=True)
         return pdf_path
     except Exception as e:
         print(f"OFD转换失败: {e}")
@@ -527,6 +667,7 @@ def smart_ocr(path):
             with fitz.open(path) as doc:
                 for p in doc: text += p.get_text()
 
+        info['recognized_text'] = text
         # 预处理：去除空格用于关键词匹配和日期提取
         clean_txt = text.replace(" ", "").replace("¥", "￥").replace("CNY", "￥").replace("\n", "")
 
@@ -656,116 +797,51 @@ def smart_ocr(path):
     except: return info
 
 def _build_layout(ids, duplicate_special=False):
-    """构建页面布局：专票独占一页，发票+行程单配对拼页，普票2张拼一页。"""
-    db = load_db()
-    settings = load_settings()
-    fmap = {i['id']: i['name'] for i in db['invoices']}
-    cat_map = {i['id']: i.get('category', '') for i in db['invoices']}
-    doc_type_map = {i['id']: i.get('document_type', '') for i in db['invoices']}
-    special_cats = set(settings.get("special_categories", []))
-    W, H = 595, 842
-    MARGIN = 40
-    special_rect = fitz.Rect(MARGIN, MARGIN, W - MARGIN, H - MARGIN)
-    normal_rects = [fitz.Rect(20, 20, W-20, H/2 - 10), fitz.Rect(20, H/2 + 10, W-20, H-20)]
-
-    # ── 配对：发票+行程单按类型配对 ─────────────────────────────
-    # ── 发票 ↔ 行程单 智能配对 ────────────────────────────────────
-    PAIR_HINTS = {'打车费': '打车', '公共交通': '地铁'}
-    # 构建发票详情索引
-    inv_details = {}
-    for inv in db['invoices']:
-        inv_details[inv['id']] = {
-            'amount': round(float(inv.get('amount', 0)), 2),
-            'date': inv.get('date_start') or inv.get('invoice_date') or '',
-            'seller': inv.get('seller_name', ''),
-            'route': inv.get('route', ''),
-        }
-
-    pair_of = {}
-    for inv_id in ids:
-        cat = cat_map.get(inv_id, '')
-        if cat not in PAIR_HINTS or inv_id in pair_of:
-            continue
-        hint = PAIR_HINTS[cat]
-        inv_info = inv_details.get(inv_id, {})
-        best_score = -1
-        best_nid = None
-        for nid in ids:
-            if nid == inv_id or nid in pair_of: continue
-            if cat_map.get(nid) != '行程单' or hint not in doc_type_map.get(nid, ''):
-                continue
-            trip_info = inv_details.get(nid, {})
-            score = 0
-            # 金额完全匹配 +50
-            if inv_info.get('amount') > 0 and inv_info['amount'] == trip_info.get('amount'):
-                score += 50
-            # 日期匹配 +30
-            if inv_info.get('date') and inv_info['date'] == trip_info.get('date'):
-                score += 30
-            # 路线/城市匹配 +20
-            if inv_info.get('route') and trip_info.get('route'):
-                inv_route = inv_info['route']
-                trip_route = trip_info['route']
-                if inv_route[:2] == trip_route[:2]:  # 同城市前缀
-                    score += 20
-            if score > best_score:
-                best_score = score
-                best_nid = nid
-        if best_nid and best_score >= 50:  # 至少金额匹配
-            pair_of[inv_id] = best_nid
-            pair_of[best_nid] = inv_id
-
-    # ── 生成页面 ───────────────────────────────────────────────
-    pages = []
-    page_map = {}
-    normal_buf = []
-    normal_buf_ids = []
-    paired_done = set()
-
-    def flush_normals(buf, buf_ids):
-        for i in range(0, len(buf), 2):
-            items = [(buf[i], normal_rects[0])]
-            page_map[buf_ids[i]] = len(pages)
-            if i+1 < len(buf):
-                items.append((buf[i+1], normal_rects[1]))
-                page_map[buf_ids[i+1]] = len(pages)
-            pages.append(items)
-
-    for inv_id in ids:
-        if inv_id not in fmap: continue
-        if inv_id in paired_done: continue
-        fpath = os.path.join(UPLOAD_DIR, fmap[inv_id])
-        partner_id = pair_of.get(inv_id)
-
-        if partner_id:
-            if normal_buf:
-                flush_normals(normal_buf, normal_buf_ids)
-                normal_buf = []; normal_buf_ids = []
-            partner_fpath = os.path.join(UPLOAD_DIR, fmap[partner_id])
-            page_map[inv_id] = len(pages)
-            page_map[partner_id] = len(pages)
-            pages.append([(fpath, normal_rects[0]), (partner_fpath, normal_rects[1])])
-            paired_done.add(inv_id)
-            paired_done.add(partner_id)
-        elif cat_map.get(inv_id) in special_cats:
-            if normal_buf:
-                flush_normals(normal_buf, normal_buf_ids)
-                normal_buf = []; normal_buf_ids = []
-            page_map[inv_id] = len(pages)
-            pages.append([(fpath, special_rect)])
-            if duplicate_special:
-                page_map[inv_id] = len(pages) - 1
-                pages.append([(fpath, special_rect)])
+    records = resolve_associations(load_db()['invoices'])
+    by_id = {row['id']: row for row in records}
+    selected = list(dict.fromkeys(i for i in ids if i in by_id))
+    selected_set = set(selected)
+    children = {}
+    for row in records:
+        if row['id'] in selected_set and row.get('parent_id') in selected_set:
+            children.setdefault(row['parent_id'], []).append(row['id'])
+    special = set(load_settings().get('special_categories', []))
+    slots = [fitz.Rect(20, 20, 575, 411), fitz.Rect(20, 431, 575, 822)]
+    pages, page_map, pending, done = [], {}, [], set()
+    def documents(invoice_id):
+        path = os.path.join(UPLOAD_DIR, by_id[invoice_id]['name'])
+        with fitz.open(path) as source:
+            return [((path, n), invoice_id) for n in range(len(source))]
+    def flush():
+        for index in range(0, len(pending), 2):
+            sheet = []
+            for slot, (source, invoice_id) in enumerate(pending[index:index+2]):
+                page_map.setdefault(invoice_id, len(pages))
+                sheet.append((source, slots[slot]))
+            pages.append(sheet)
+        pending.clear()
+    for invoice_id in selected:
+        if invoice_id in done: continue
+        row = by_id[invoice_id]
+        if row.get('parent_id') in selected_set:
+            invoice_id = row['parent_id']
+            row = by_id[invoice_id]
+        if invoice_id in done: continue
+        group = [invoice_id] + children.get(invoice_id, [])
+        done.update(group)
+        if len(group) > 1:
+            flush()
+            for member in group: pending.extend(documents(member))
+            flush()
+        elif row.get('category') in special:
+            flush()
+            page_map[invoice_id] = len(pages)
+            original = [[(source, fitz.Rect(40, 40, 555, 802))] for source, _ in documents(invoice_id)]
+            pages.extend(original)
+            if duplicate_special: pages.extend(original)
         else:
-            normal_buf.append(fpath)
-            normal_buf_ids.append(inv_id)
-            if len(normal_buf) == 2:
-                flush_normals(normal_buf, normal_buf_ids)
-                normal_buf = []; normal_buf_ids = []
-
-    if normal_buf:
-        flush_normals(normal_buf, normal_buf_ids)
-
+            pending.extend(documents(invoice_id))
+    flush()
     return pages, page_map
 
 @app.route('/api/render_pages', methods=['POST'])
@@ -795,17 +871,15 @@ def render_pages():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-def insert_to_page(page, fpath, rect):
-    try:
-        src = fitz.open(fpath)
-        src_page = src[0]
-        rot = -90 if src_page.rect.height > src_page.rect.width else 0
-        page.show_pdf_page(rect, src, 0, rotate=rot, keep_proportion=True)
-    except Exception as e:
-        print(f"insert_to_page error for {fpath}: {e}")
-    finally:
-        try: src.close()
-        except: pass
+def insert_to_page(page, source, rect):
+    path, number = source if isinstance(source, tuple) else (source, 0)
+    with fitz.open(path) as document:
+        # rect reflects CropBox and source rotation. Preserve all visible content.
+        bounds = document[number].rect
+        normal = min(rect.width / bounds.width, rect.height / bounds.height)
+        rotated = min(rect.width / bounds.height, rect.height / bounds.width)
+        rotation = 90 if rotated > normal else 0
+        page.show_pdf_page(rect, document, number, rotate=rotation, keep_proportion=True)
 
 @app.route('/api/download_pdf', methods=['POST'])
 def download_pdf():
@@ -821,12 +895,15 @@ def download_pdf():
         if len(items) == 2:
             page.draw_line((20, H/2), (W-20, H/2), color=(0.7,0.7,0.7), dashes=[2])
     doc.save(MERGED_PDF)
+    doc.close()
     return jsonify({"url": "/file/merged_preview.pdf"})
 
 @app.route('/api/init')
 def init():
     data = load_db()
+    data["invoices"] = resolve_associations(data["invoices"])
     data["settings"] = load_settings()
+    data["version"] = APP_VERSION
     return jsonify(data)
 
 @app.route('/api/settings', methods=['GET', 'POST'])
@@ -853,22 +930,11 @@ def upload():
         # 图片转 PDF
         if ext in ('jpg', 'jpeg', 'png'):
             try:
-                img = Image.open(path)
-                if img.mode == 'RGBA':
-                    img = img.convert('RGB')
                 pdf_path = path.rsplit('.', 1)[0] + '.pdf'
-                # A4 尺寸：595 x 842 点
-                a4_w, a4_h = 595, 842
-                img_w, img_h = img.size
-                scale = min(a4_w / img_w, a4_h / img_h)
-                new_w, new_h = int(img_w * scale), int(img_h * scale)
-                img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                # 居中放到 A4 白底
-                a4_img = Image.new('RGB', (a4_w, a4_h), (255, 255, 255))
-                offset_x = (a4_w - new_w) // 2
-                offset_y = (a4_h - new_h) // 2
-                a4_img.paste(img_resized, (offset_x, offset_y))
-                a4_img.save(pdf_path, 'PDF')
+                with fitz.open(path) as image_document:
+                    pdf_bytes = image_document.convert_to_pdf()
+                with fitz.open(stream=pdf_bytes, filetype='pdf') as image_pdf:
+                    image_pdf.save(pdf_path)
                 os.remove(path)
                 name = name.rsplit('.', 1)[0] + '.pdf'
                 path = pdf_path
@@ -909,6 +975,7 @@ def upload():
                 "category": info['category'], "date": datetime.datetime.now().strftime("%Y-%m-%d"),
                 "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
                 "route": info.get('route', ''), "md5": cur_md5,
+                "recognized_text": info.get("recognized_text", ""),
                 "document_type": info.get("document_type", ""),
                 "confidence": info.get("confidence", 0),
                 "matched_evidence": info.get("matched_evidence", []),
@@ -991,16 +1058,11 @@ def import_zip():
             # 图片转 PDF
             if ext in ('jpg', 'jpeg', 'png'):
                 try:
-                    img = Image.open(path)
-                    if img.mode == 'RGBA': img = img.convert('RGB')
                     pdf_path = path.rsplit('.', 1)[0] + '.pdf'
-                    a4_w, a4_h = 595, 842
-                    scale = min(a4_w / img.size[0], a4_h / img.size[1])
-                    new_w, new_h = int(img.size[0] * scale), int(img.size[1] * scale)
-                    img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                    a4_img = Image.new('RGB', (a4_w, a4_h), (255, 255, 255))
-                    a4_img.paste(img_resized, ((a4_w - new_w) // 2, (a4_h - new_h) // 2))
-                    a4_img.save(pdf_path, 'PDF')
+                    with fitz.open(path) as image_document:
+                        pdf_bytes = image_document.convert_to_pdf()
+                    with fitz.open(stream=pdf_bytes, filetype='pdf') as image_pdf:
+                        image_pdf.save(pdf_path)
                     os.remove(path)
                     fname = fname.rsplit('.', 1)[0] + '.pdf'
                     path = pdf_path
@@ -1036,7 +1098,8 @@ def import_zip():
                     "date": datetime.datetime.now().strftime("%Y-%m-%d"),
                     "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
                     "route": info.get('route', ''), "md5": cur_md5,
-                    "document_type": info.get("document_type", ""),
+                    "recognized_text": info.get("recognized_text", ""),
+                "document_type": info.get("document_type", ""),
                     "confidence": info.get("confidence", 0),
                     "matched_evidence": info.get("matched_evidence", []),
                     "risk_points": info.get("risk_points", []),
@@ -1127,16 +1190,11 @@ def import_folder_confirm():
             # 图片转 PDF
             if ext in ('jpg', 'jpeg', 'png'):
                 try:
-                    img = Image.open(dest)
-                    if img.mode == 'RGBA': img = img.convert('RGB')
                     pdf_path = dest.rsplit('.', 1)[0] + '.pdf'
-                    a4_w, a4_h = 595, 842
-                    scale = min(a4_w / img.size[0], a4_h / img.size[1])
-                    new_w, new_h = int(img.size[0] * scale), int(img.size[1] * scale)
-                    img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-                    a4_img = Image.new('RGB', (a4_w, a4_h), (255, 255, 255))
-                    a4_img.paste(img_resized, ((a4_w - new_w) // 2, (a4_h - new_h) // 2))
-                    a4_img.save(pdf_path, 'PDF')
+                    with fitz.open(dest) as image_document:
+                        pdf_bytes = image_document.convert_to_pdf()
+                    with fitz.open(stream=pdf_bytes, filetype='pdf') as image_pdf:
+                        image_pdf.save(pdf_path)
                     os.remove(dest)
                     new_name = new_name.rsplit('.', 1)[0] + '.pdf'
                     dest = pdf_path
@@ -1170,7 +1228,8 @@ def import_folder_confirm():
                     "date": datetime.datetime.now().strftime("%Y-%m-%d"),
                     "date_start": info.get('date_start', ''), "date_end": info.get('date_end', ''),
                     "route": info.get('route', ''), "md5": cur_md5,
-                    "document_type": info.get("document_type", ""),
+                    "recognized_text": info.get("recognized_text", ""),
+                "document_type": info.get("document_type", ""),
                     "confidence": info.get("confidence", 0),
                     "matched_evidence": info.get("matched_evidence", []),
                     "risk_points": info.get("risk_points", []),
@@ -1228,6 +1287,7 @@ def update():
                 i['confidence'] = 1.0
             if 'status' in changes and changes['status'] in INVOICE_STATUSES:
                 i['status'] = changes.pop('status')
+            i.setdefault('original_name', i.get('display_name', ''))
             i.update(changes)
             i['updated_at'] = datetime.datetime.now().isoformat(timespec="seconds")
             break
@@ -1979,8 +2039,18 @@ def stats():
     })
 
 if __name__ == '__main__':
-    # 启动收件箱监听
+    from waitress import create_server
+    # An OS-selected loopback port avoids collisions with other local programs.
+    server = create_server(app, host='127.0.0.1', port=0, threads=1)
+    url = 'http://127.0.0.1:' + str(server.effective_port)
     threading.Thread(target=_inbox_watcher, daemon=True).start()
-    threading.Thread(target=lambda: (time.sleep(1.5), webbrowser.open('http://127.0.0.1:5000'))).start()
-    print(">>> 启动成功！请在浏览器访问 http://127.0.0.1:5000 <<<")
-    app.run(port=5000, debug=False)
+    if '--no-browser' not in sys.argv:
+        webbrowser.open(url)
+    print('InvoiceBox ' + APP_VERSION + '\n' + url, flush=True)
+    print('Keep this window open while using InvoiceBox. Close it to exit.', flush=True)
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.close()
