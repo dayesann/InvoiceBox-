@@ -13,3 +13,7 @@ server_err.txt
 
 *.tmp
 *.corrupt-*
+
+# Local web build and dependencies
+web/node_modules/
+web/dist/

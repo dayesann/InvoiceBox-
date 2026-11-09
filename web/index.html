@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; worker-src 'self' blob:; font-src 'self' data: blob:; object-src 'none'; base-uri 'self'">
+    <title>发票盒子</title>
+    <link rel="icon" type="image/svg+xml" href="/icons/brand.svg">
+    <script>document.head.insertAdjacentHTML('beforeend','<style>[v-cloak]{display:none!important}</style>');</script>
+  <script type="module" crossorigin src="/assets/app.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-AFtD159l.css">
+  <link rel="stylesheet" href="/assets/association.css">
+</head>
+<body>
+
+<div id="err-bar"></div>
+<div id="loading">生成中...</div>
+<div id="print-overlay"><div class="spinner"></div><span>正在准备打印...</span></div>
+
+<div id="app" v-cloak>
+        <header class="top-bar app-header">
+            <div class="brand"><span class="brand-mark"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#archive"></use></svg></span><h1>发票盒子</h1><span class="app-version" :title="'应用版本 ' + appVersion">v{{ appVersion }}<span v-if="appChannel"> · {{ appChannel }}</span></span></div>
+            <div class="seg-ctrl" role="tablist" aria-label="材料预览">
+                <button class="seg-item" role="tab" :aria-selected="view==='preview'" :class="{active: view==='preview'}" @click="changeView('preview')"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#files"></use></svg>拼版预览</button>
+                <button class="seg-item" role="tab" :aria-selected="view==='report'" :class="{active: view==='report'}" @click="changeView('report')"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#archive"></use></svg>报销单</button>
+            </div>
+            <div class="actions">
+                <div class="menu-anchor" @click.stop>
+                    <button id="print-options-trigger" class="icon-button" aria-label="打印设置" title="打印设置" :aria-expanded="printOptionsOpen" @click="toggleMenu()"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#sliders-horizontal"></use></svg></button>
+                    <Transition name="popover"><div v-if="printOptionsOpen" class="print-options" role="group" aria-label="打印设置"><label><input type="checkbox" v-model="dupSpecial">专票打印两份</label><p>适用于机票、火车票和住宿凭证。</p><label class="ofd-quality">OFD 输出精度<select v-model.number="ofdDpi" aria-label="OFD 输出精度"><option :value="600">高清 · 600 DPI（较快）</option><option :value="1200">超高清 · 1200 DPI</option></select></label><p>只影响 OFD；PDF 原文件保持原有清晰度。</p></div></Transition>
+                </div>
+                <button class="btn btn-dl" :disabled="uploading || printing || !list.length" @click="requestExport('download')"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#download"></use></svg>下载</button>
+                <button class="btn btn-primary btn-print" :disabled="uploading || printing || !list.length" @click="requestExport('print')"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#printer"></use></svg>打印</button>
+            </div>
+        </header>
+
+    <div class="sidebar">
+        <div class="brand-row library-heading">
+            <h2>本次单据 <span>{{ list.length }}</span></h2>
+
+            <button id="clear-trigger" class="clear-button" :disabled="uploading || printing || !list.length" @click="clearAll"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#trash"></use></svg>清空</button>
+        </div>
+        <button class="upload-area" :disabled="uploading || printing" @click="$refs.file.click()" @dragover.prevent="dragOver=true" @dragleave="dragOver=false" @drop.prevent="handleDrop($event)" :class="{'drag-over': dragOver}">
+            <svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#plus"></use></svg><span><span class="upload-title">{{ uploading ? '正在识别…' : '添加文件' }}</span><span class="upload-types">PDF · OFD · JPG · PNG</span></span>
+        </button>
+        <input type="file" class="file-input" ref="file" multiple accept=".pdf,.ofd,.png,.jpg,.jpeg" @change="handleUpload">
+        <div class="search-bar">
+            <div class="search-field"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#search"></use></svg><input v-model="searchText" aria-label="搜索单据" placeholder="搜索单据" @click.stop></div>
+            <select v-model="filterCat" aria-label="费用分类" @click.stop>
+                <option value="">全部分类</option>
+                <option v-for="opt in ['打车费','公共交通','行程单','住宿','餐饮','火车票','机票','专票','办公','其他']" :value="opt">{{opt}}</option>
+            </select>
+        </div>
+        <div class="sort-bar" v-if="list.length > 0">
+            <span title="拖动行程单到对应的发票上，即可手动关联">{{ filteredList.length }} 份单据 · 拖拽关联</span>
+            <select v-model="sortBy" aria-label="排序方式" @click.stop>
+                <option value="default">导入顺序</option>
+                <option value="amount-desc">金额 ↓</option>
+                <option value="amount-asc">金额 ↑</option>
+                <option value="date-desc">日期 ↓</option>
+                <option value="date-asc">日期 ↑</option>
+                <option value="name">文件名</option>
+            </select>
+        </div>
+        <div class="list" :inert="uploading || printing" @dragover.prevent>
+            <div v-if="list.length && filteredList.length===0" class="list-empty">没有找到匹配的单据</div>
+            <div v-for="(item, idx) in filteredList" :key="item.id"
+                 class="card" :data-role="documentRole(item)" :id="'invoice-'+item.id" draggable="true"
+                 @click="scrollToPage(item.id)"
+                 @dragstart="dragStart(item.id,$event)" @dragenter.prevent="dragEnter(item.id)" @dragover.prevent @drop.stop.prevent="dropOnCard(item.id)" @dragend="dragEnd"
+                 :class="{dragging: dragIdx===item.id, 'drop-target': dragHover===item.id && dragIdx!==item.id, focused: focusedId===item.id}">
+                <div class="card-top">
+                    <select v-model="item.category" class="tag-select" @change="changeCategory(item)" @click.stop>
+                        <option v-for="opt in ['打车费','公共交通','行程单','住宿','餐饮','火车票','机票','专票','办公','其他']" :value="opt">{{opt}}</option>
+                    </select>
+                    <button class="icon-button delete-button" @click.stop="del(item)" :aria-label="'删除 ' + item.display_name" title="删除"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#trash"></use></svg></button>
+                </div>
+                <div class="card-content">
+                    <input class="name-input" :value="item.display_name" @blur="item.display_name=$event.target.value; update(item).then(reloadInvoices)" @click.stop :title="item.display_name" placeholder="(未命名)">
+                    <div class="money-field"><span>¥</span> <input v-model="item.amount" @blur="update(item,true).then(reloadInvoices)" class="money-input" :aria-label="'金额 '+item.display_name" @click.stop></div>
+                </div>
+                <div class="card-meta">
+                    <span class="document-label" :title="item.association_reason || ''">{{ bundle.labels[item.id] }}{{ documentRole(item)==='attachment' ? ' · 不计金额' : '' }}{{ item.association_state==='suggested' ? ' · 自动' : '' }}</span>
+                    <span class="card-route" :title="item.route" v-if="item.route && (item.category === '机票' || item.category === '火车票')">{{ item.route }}</span>
+                    <button v-if="documentRole(item)==='attachment'" class="association-toggle" type="button" @click.stop="toggleAssociation(item.id)" :aria-expanded="associationOpen===item.id">关联</button>
+                </div>
+                <div v-if="documentRole(item)==='attachment' && associationOpen===item.id" class="association-control" @click.stop @dragstart.stop>
+                    <label :for="'association-'+item.id">关联的费用项</label>
+                    <select :id="'association-'+item.id" :value="item.parent_id || ''" @change="setAssociation(item,$event.target.value)">
+                        <option value="">不关联</option>
+                        <option v-for="expense in list.filter(row => documentRole(row)==='expense')" :key="expense.id" :value="expense.id">{{ expense.display_name }} · ¥{{ Number(expense.amount || 0).toFixed(2) }}{{ (item.association_candidates || []).includes(expense.id) ? '（候选）' : '' }}</option>
+                    </select>
+                    <p>{{ item.association_state==='suggested' ? '建议关联：' : item.association_state==='confirmed' ? '已确认：' : '待处理：' }}{{ item.association_reason }}</p>
+                    <p v-if="item.association_warning" class="association-warning">请核对：{{ item.association_warning }}</p>
+                    <div class="association-actions">
+                        <button v-if="item.association_state==='suggested'" type="button" @click="confirmAssociation(item)">确认关联</button>
+                        <button v-if="item.association_state==='unmatched' && item.association_origin!=='rejected'" type="button" @click="setAssociation(item,'')">保持不关联</button>
+                        <button type="button" @click="retryAssociation(item)">重新匹配</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+        <div class="toast-container" id="toastBox"></div>
+        <div class="status-bar"><span>报销合计</span><strong>¥ {{ total.toFixed(2) }}</strong></div>
+    </div>
+
+    <div class="main">
+        <div class="workspace" :class="{'is-empty':!list.length}">
+            <template v-if="view==='preview' || printing || !list.length">
+                <div v-for="(page, idx) in pages" :key="idx" :id="'page-'+idx" class="paper a4-page">
+                    <div class="page-num">第 {{ idx + 1 }} 页</div>
+                    <div class="full-page"><img v-if="page[0]" :src="page[0]"></div>
+                </div>
+                <div v-if="list.length===0" class="empty-state"><div class="empty-mark"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#files"></use></svg></div><h2>还没有发票</h2><button class="btn" @click="$refs.file.click()"><svg class="ui-icon" aria-hidden="true"><use href="/icons/lucide.svg#plus"></use></svg>添加发票</button></div>
+            </template>
+
+            <div v-show="(view==='report' && list.length) || printing" class="report-paper">
+                <div class="report-sheet">
+                    <h2>费用报销单</h2>
+                    <div class="report-meta">
+                        <span><b>申请日期：</b>{{ today }}</span>
+                        <span><b>发票：</b>{{ summary.expenseCount }} 张 · <b>附件：</b>{{ summary.documentCount - summary.expenseCount }} 张 · <b>合计：</b>{{ summary.documentCount }} 张</span>
+                    </div>
+                    <table>
+                        <thead><tr><th>费用类别</th><th>发票数量</th><th>金额（元）</th></tr></thead>
+                        <tbody>
+                            <tr v-for="(group, category) in grouped" :key="category">
+                                <td style="text-align:center">{{ category }}</td>
+                                <td style="text-align:center">{{ group.count }}</td>
+                                <td style="text-align:right">{{ group.total.toFixed(2) }}</td>
+                            </tr>
+                            <tr class="total-row"><td style="text-align:center">合计</td><td style="text-align:center">{{ summary.expenseCount }}</td><td style="text-align:right;white-space:nowrap">¥ {{ total.toFixed(2) }}</td></tr>
+                        </tbody>
+                    </table>
+                    <div style="margin-top:20px;font-size:14px;font-weight:bold;">金额大写：{{ digitUppercase(total) }}</div>
+                    <div class="sign-area">
+                        <div class="sign-item"><input class="report-input" v-model="reportApplicant" @input="reportApplicantEdited=true" aria-label="报销申请人" placeholder=" "><span class="sign-role">报销申请人</span></div>
+                        <div class="sign-item"><input class="report-input" v-model="reportDepartment" aria-label="部门负责人" placeholder=" "><span class="sign-role">部门负责人</span></div>
+                        <div class="sign-item"><input class="report-input" v-model="reportFinance" aria-label="财务审核" placeholder=" "><span class="sign-role">财务审核</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="modal-overlay" v-if="reviewOpen" @click.self="reviewOpen=false">
+        <div class="modal-box review-box" role="dialog" aria-modal="true" aria-label="导出前核对">
+            <h4>导出前核对</h4>
+            <p>以下 {{ issues.length }} 项需要核对。可返回原件修改；确认保留的情况请逐项勾选，再继续{{ pendingAction==='print' ? '打印' : '下载' }}。</p>
+            <div class="review-list">
+                <div v-for="issue in issues" :key="issue.key" class="review-item">
+                    <label><input type="checkbox" v-model="acknowledgedIssues" :value="issue.key">{{ issue.message }}</label>
+                    <button @click="focusIssue(issue)">定位原件 / 修改</button>
+                </div>
+            </div>
+            <div class="modal-btns">
+                <button class="btn" @click="reviewOpen=false">返回整理</button>
+                <button class="btn btn-primary" :disabled="!allReviewed" @click="continueExport">已核对，继续{{ pendingAction==='print' ? '打印' : '下载' }}</button>
+            </div>
+        </div>
+    </div>
+    <div class="modal-overlay" v-if="modalType" @click.self="modalType=null">
+        <div class="modal-box" role="dialog" aria-modal="true" :aria-label="modalType === 'delete' ? '删除这份单据？' : '清空全部单据？'" @click.stop>
+            <h4>{{ modalType === 'delete' ? '删除这份单据？' : '清空全部单据？' }}</h4>
+            <p v-if="modalType === 'delete'">将移除「{{ modalTarget?.display_name || '未命名' }}」。原始文件不受影响。</p>
+            <p v-else>将移除本次添加的 {{ list.length }} 份单据。原始文件不受影响，之后可重新添加。</p>
+            <div class="modal-btns">
+                <button class="btn" @click="modalType=null">取消</button>
+                <button class="btn btn-danger" @click="confirmAction">{{ modalType==='delete' ? '删除单据' : '清空单据' }}</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+</body>
+</html>
