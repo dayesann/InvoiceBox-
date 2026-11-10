@@ -12,6 +12,26 @@ export function sourceDpiForPrint(widthMm, heightMm, targetDpi, { special = fals
   return Math.ceil(Math.max(72, Math.min(6000, target * scale)));
 }
 
+// JPEG has no alpha channel. Composite white behind the rendered OFD before
+// encoding, retaining translucent ink, signatures, and the requested resolution.
+export function ofdCanvasBlob(canvas, format = 'png') {
+  if (format === 'jpeg') {
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('无法获取 OFD 页面画布');
+    context.save();
+    try {
+      context.resetTransform();
+      context.globalAlpha = 1;
+      context.globalCompositeOperation = 'destination-over';
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    } finally {
+      context.restore();
+    }
+  }
+  return new Promise(resolve => canvas.toBlob(resolve, format === 'jpeg' ? 'image/jpeg' : 'image/png', .95));
+}
+
 export class BlobLruCache {
   constructor(maxBytes = 64 * 1024 * 1024) {
     this.maxBytes = maxBytes;

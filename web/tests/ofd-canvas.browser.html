@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OFD canvas regression</title>
+<h1>OFD canvas regression</h1>
+<pre id="result">Running…</pre>
+<script type="module">
+import { ofdCanvasBlob } from '../assets/ofd-output.js';
+const results = [];
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+try {
+  for (const dpi of [600, 1200]) {
+    const canvas = document.createElement('canvas');
+    canvas.width = dpi;
+    canvas.height = dpi / 2;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(255,0,0,.5)';
+    ctx.fillRect(100, 100, 100, 100);
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(250, 100, 100, 100);
+    ctx.translate(10, 10);
+    ctx.globalAlpha = .25;
+    ctx.globalCompositeOperation = 'source-over';
+    const jpeg = await ofdCanvasBlob(canvas, 'jpeg');
+    const bitmap = await createImageBitmap(jpeg);
+    check(bitmap.width === dpi && bitmap.height === dpi / 2, `${dpi}: resolution changed`);
+    const decoded = document.createElement('canvas');
+    decoded.width = bitmap.width; decoded.height = bitmap.height;
+    const output = decoded.getContext('2d'); output.drawImage(bitmap, 0, 0);
+    const sample = (x, y) => [...output.getImageData(x, y, 1, 1).data];
+    check(sample(20, 20).slice(0, 3).every(v => v >= 250), `${dpi}: background is not white`);
+    const red = sample(150, 150);
+    check(red[0] >= 250 && red[1] > 115 && red[1] < 140 && red[2] > 115 && red[2] < 140, `${dpi}: translucent ink changed`);
+    check(sample(300, 150).slice(0, 3).every(v => v < 5), `${dpi}: black text changed`);
+    check(ctx.globalAlpha === .25 && ctx.getTransform().e === 10 && ctx.globalCompositeOperation === 'source-over', `${dpi}: context state changed`);
+    results.push({ dpi, background: sample(20,20), translucentInk: red, size:[bitmap.width,bitmap.height] });
+    bitmap.close();
+  }
+  const transparent = document.createElement('canvas'); transparent.width = transparent.height = 10;
+  const png = await createImageBitmap(await ofdCanvasBlob(transparent, 'png'));
+  const ctx = transparent.getContext('2d'); ctx.drawImage(png, 0, 0);
+  check(ctx.getImageData(0,0,1,1).data[3] === 0, 'PNG preview transparency changed');
+  png.close();
+  document.querySelector('#result').textContent = 'PASS\n' + JSON.stringify(results, null, 2);
+} catch (error) {
+  document.querySelector('#result').textContent = 'FAIL: ' + error.message;
+  throw error;
+}
+</script>

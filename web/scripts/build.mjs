@@ -51,7 +51,7 @@ app = app.slice(0, ofdStart) + `if(a===\`ofd\`){
     let blob=key?ofdBlobCache.get(key):undefined;
     if(!blob){
       const canvas=document.createElement(\`canvas\`);
-      const render=async dpi=>{canvas.width=canvas.height=0;await wB(doc,pageIndex,canvas,{dpi});return await new Promise(resolve=>canvas.toBlob(resolve,r===\`jpeg\`?\`image/jpeg\`:\`image/png\`,.95))};
+      const render=async dpi=>{canvas.width=canvas.height=0;await wB(doc,pageIndex,canvas,{dpi});return await ofdCanvasBlob(canvas,r)};
       let fallback=false;
       try{
         blob=await render(pageDpi);
@@ -96,8 +96,8 @@ replaceOnce('let z=rl(()=>{let e=[...O.value];', 'let z=rl(()=>{let e=[...k.valu
 replaceOnce('fe=e=>s.value=e,pe=e=>{if(s.value===e)return;let t=n.value.findIndex(e=>e.id===s.value),r=n.value.findIndex(t=>t.id===e);if(t<0||r<0)return;let i=n.value[t];n.value.splice(t,1),n.value.splice(r,0,i)},me=()=>{s.value=-1,R()}', 'fe=(id,event)=>{s.value=id;ibDragHover.value="";if(event?.dataTransfer){event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",id)}},pe=id=>{ibDragHover.value=id},me=()=>{s.value=-1;ibDragHover.value=""}');
 replaceOnce('return Ha(()=>{N(),document.addEventListener', `let ibOfdDpi=Dn(600),ibDragHover=Dn(''),ibAssociationOpen=Dn(''),ibToggleAssociation=id=>{ibAssociationOpen.value=ibAssociationOpen.value===id?'':id},ibSetAssociation=async(item,parent)=>{try{await te({...item,parent_id:parent,association_origin:parent?'manual':'rejected'});await N()}catch(error){console.error(error)}},ibConfirmAssociation=async item=>ibSetAssociation(item,item.parent_id),ibRetryAssociation=async item=>{try{await te({...item,parent_id:'',association_origin:'auto'});await N()}catch(error){console.error(error)}},ibDropOnCard=async targetId=>{let plan=planCardDrop(n.value,s.value,targetId);s.value=-1;ibDragHover.value='';if(!plan)return;n.value=plan.records;if(d.value!=='default')d.value='default';try{if(plan.attachmentId){let idx=n.value.findIndex(item=>item.id===plan.attachmentId),updated={...n.value[idx],parent_id:plan.expenseId,association_origin:'manual'};n.value.splice(idx,1,updated);await te(updated)}await R();await N()}catch(error){console.error(error);await N()}};return Ha(()=>{N(),document.addEventListener`);
 replaceOnce('issues:j,documentRole:hV,changeCategory:V', 'issues:j,documentRole:hV,ofdDpi:ibOfdDpi,reloadInvoices:N,setAssociation:ibSetAssociation,confirmAssociation:ibConfirmAssociation,retryAssociation:ibRetryAssociation,associationOpen:ibAssociationOpen,toggleAssociation:ibToggleAssociation,dragHover:ibDragHover,dropOnCard:ibDropOnCard,changeCategory:V');
-replaceOnce('let e=`2026.11.05.1`,t=document.querySelector', 'let e=`2026.11.09.1`,t=document.querySelector');
-app = `import { resolveAssociations } from './matching.js';\nimport { planCardDrop } from './drag-association.js';\nimport { visiblePageBox, embeddedPageGeometry } from './pdf-page.js';\nimport { sourceDpiForPrint, ofdBlobCache } from './ofd-output.js';\nimport { appendReport } from './report-pdf.js';\nwindow.addEventListener('pagehide',()=>ofdBlobCache.clear());\n` + app;
+replaceOnce('let e=`2026.11.05.1`,t=document.querySelector', 'let e=`2026.11.10.1`,t=document.querySelector');
+app = `import { resolveAssociations } from './matching.js';\nimport { planCardDrop } from './drag-association.js';\nimport { visiblePageBox, embeddedPageGeometry } from './pdf-page.js';\nimport { sourceDpiForPrint, ofdBlobCache, ofdCanvasBlob } from './ofd-output.js';\nimport { appendReport } from './report-pdf.js';\nwindow.addEventListener('pagehide',()=>ofdBlobCache.clear());\n` + app;
 
 await mkdir(path.join(dest, 'assets'), { recursive: true });
 await cp(path.join(root, 'public'), dest, { recursive: true });
